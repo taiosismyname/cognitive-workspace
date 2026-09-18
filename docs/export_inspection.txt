@@ -1,0 +1,31 @@
+workbook_sheets=['User Profile', 'User Preferences', 'AI Assistant Settings', 'Memory', 'Subscription Details', 'Collections & Shared Content', 'Account Information', 'Notification Settings']
+sheet=User Profile max_row=2 max_column=3
+header=['USER_ID', 'USERNAME', 'USER_EMAIL']
+first_row_value_types=['int', 'str', 'str']
+sheet=User Preferences max_row=2 max_column=10
+header=['USER_ID', 'DEFAULT_MODEL', 'DEFAULT_IMAGE_GENERATION_MODEL', 'DEFAULT_VIDEO_GENERATION_MODEL', 'DISABLE_TRAINING', 'NOTIF_STATUS', 'EMAIL_STATUS', 'DEVICE_LANGUAGE', 'CREATED', 'UPDATED']
+first_row_value_types=['int', 'str', 'str', 'str', 'bool', 'str', 'str', 'str', 'str', 'str']
+sheet=AI Assistant Settings max_row=2 max_column=22
+header=['ID', 'USER_ID', 'BIO', 'OCCUPATION', 'COMPANY_NAME', 'LOCATION', 'LANGUAGE', 'QUESTIONS_ANSWERS', 'DISABLED', 'LOCATION_LAT', 'LOCATION_LNG', 'LOCATION_CITY', 'LOCATION_REGION', 'LOCATION_COUNTRY', 'LOCATION_UPDATED_AT', 'USE_MEMORY', 'USE_SEARCH_HISTORY', 'ANSWER_STYLING_PREFERENCES', 'DATE_OF_BIRTH', 'GENDER', 'CREATED', 'UPDATED']
+first_row_value_types=['int', 'int', 'str', 'str', 'NoneType', 'str', 'NoneType', 'NoneType', 'bool', 'str', 'str', 'str', 'str', 'str', 'str', 'bool', 'bool', 'NoneType', 'str', 'str', 'str', 'str']
+sheet=Memory max_row=170 max_column=5
+header=['USER_ID', 'MEMORY_KEY', 'MEMORY_VALUE', 'FIRST_CREATED_AT', 'LAST_UPDATED_AT']
+first_row_value_types=['int', 'str', 'str', 'str', 'str']
+sheet=Subscription Details max_row=2 max_column=8
+header=['CREATED', 'UPDATED', 'USER_ID', 'SUBSCRIPTION_TIER', 'PAYMENT_TIER', 'STRIPE_STATUS', 'STRIPE_COUPON_PERIOD_START', 'STRIPE_CURRENT_PERIOD_START']
+first_row_value_types=['str', 'str', 'int', 'NoneType', 'NoneType', 'str', 'NoneType', 'NoneType']
+sheet=Collections & Shared Content max_row=17 max_column=8
+header=['ID', 'COLLECTION_ID', 'USER_ID', 'PERMISSION', 'CREATED', 'UPDATED', 'TITLE', 'DESCRIPTION']
+first_row_value_types=['int', 'int', 'int', 'int', 'str', 'str', 'str', 'NoneType']
+sheet=Account Information max_row=2 max_column=9
+header=['NAME', 'EMAIL', 'EMAILVERIFIED', 'USERNAME', 'IMAGE', 'SUBSCRIPTION_STATUS', 'SUBSCRIPTION_SOURCE', 'PAYMENT_TIER', 'UPDATED']
+first_row_value_types=['str', 'str', 'str', 'str', 'str', 'str', 'str', 'str', 'str']
+sheet=Notification Settings max_row=5 max_column=4
+header=['SOURCE', 'VERSION', 'CREATED', 'UPDATED']
+first_row_value_types=['str', 'NoneType', 'str', 'str']
+json_top_level_type=dict
+json_top_level_keys=['conversations']
+json_top_level_list_field=conversations length=2132
+json_top_level_list_field_keys=conversations:['collection_uuid', 'context_title', 'context_uuid', 'created_at', 'entries', 'mode', 'updated_at']
+json_nested_list_field=conversations.entries length_first_item=1
+json_nested_list_field_keys=conversations.entries:['answer', 'created_at', 'entry_uuid', 'label', 'query', 'query_status']

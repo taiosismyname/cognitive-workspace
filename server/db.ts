@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
+import mysql from "mysql2";
 import {
   conversationMessages,
   conversationOrigins,
@@ -24,9 +25,41 @@ import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
+// mysql2's `uri` option merges with any explicit sibling fields (uri parsed
+// first, then overridden by whatever else is passed) — this is the
+// documented way to layer connection options on top of a plain connection
+// string. Needed because TiDB Cloud Serverless requires TLS, and a bare
+// `drizzle(connectionString)` call doesn't reliably negotiate it: mysql2
+// only auto-enables SSL from a URL's own `ssl=`/`ssl-mode=` query param, and
+// TiDB Cloud's own connection strings often don't include one, leaving the
+// client to attempt a plaintext handshake against a server that requires
+// TLS. NOT verified against a live TiDB connection — this sandbox has no
+// network path to tidbcloud.com to test against. Verify this actually
+// connects wherever DATABASE_URL is real (Render, or your own machine)
+// before trusting it beyond that.
+function buildPoolConfig(connectionString: string) {
+  let hasExplicitSslParam = false;
+  try {
+    const url = new URL(connectionString);
+    hasExplicitSslParam = url.searchParams.has("ssl") || url.searchParams.has("ssl-mode");
+  } catch {
+    // Malformed URL — let mysql2's own parser surface the real error.
+  }
+  return {
+    uri: connectionString,
+    ssl: hasExplicitSslParam ? undefined : { minVersion: "TLSv1.2" as const, rejectUnauthorized: true },
+  };
+}
+
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
-    try { _db = drizzle(process.env.DATABASE_URL); } catch (error) { console.warn("[Database] Failed to connect:", error); _db = null; }
+    try {
+      const pool = mysql.createPool(buildPoolConfig(process.env.DATABASE_URL));
+      _db = drizzle(pool);
+    } catch (error) {
+      console.warn("[Database] Failed to connect:", error);
+      _db = null;
+    }
   }
   return _db;
 }

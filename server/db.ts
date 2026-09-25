@@ -53,6 +53,23 @@ export async function getUserByOpenId(openId: string) {
   return result[0];
 }
 
+export async function getUserByEmail(email: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(users).where(eq(users.email, email)).limit(1);
+  return result[0];
+}
+
+// Local email/password signup — separate from upsertUser (which is the
+// Manus-OAuth sync path) since this sets passwordHash and mints its own
+// openId rather than receiving one from an external identity provider.
+export async function createLocalUser(input: { openId: string; email: string; name: string; passwordHash: string }) {
+  const db = await getDb();
+  if (!db) return undefined;
+  await db.insert(users).values({ openId: input.openId, email: input.email, name: input.name, passwordHash: input.passwordHash, loginMethod: "password", lastSignedIn: new Date(), role: input.openId === ENV.ownerOpenId ? "admin" : "user" });
+  return getUserByOpenId(input.openId);
+}
+
 export async function listModels(userId: number) { const db = await getDb(); return db ? db.select().from(modelRegistry).where(eq(modelRegistry.userId, userId)).orderBy(desc(modelRegistry.updatedAt)) : []; }
 export async function listConversations(userId: number) { const db = await getDb(); return db ? db.select().from(conversations).where(eq(conversations.userId, userId)).orderBy(desc(conversations.updatedAt)) : []; }
 export async function listMessages(conversationId: number) { const db = await getDb(); return db ? db.select().from(conversationMessages).where(eq(conversationMessages.conversationId, conversationId)).orderBy(conversationMessages.createdAt) : []; }

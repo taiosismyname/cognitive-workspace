@@ -50,24 +50,35 @@ export function useAuth(options?: UseAuthOptions) {
     }
   }, [logoutMutation, utils]);
 
-  const state = useMemo(() => {
-    localStorage.setItem(
-      "manus-runtime-user-info",
-      JSON.stringify(meQuery.data)
-    );
-    return {
+  const state = useMemo(
+    () => ({
       user: meQuery.data ?? null,
       loading: meQuery.isLoading || logoutMutation.isPending,
       error: meQuery.error ?? logoutMutation.error ?? null,
       isAuthenticated: Boolean(meQuery.data),
-    };
-  }, [
-    meQuery.data,
-    meQuery.error,
-    meQuery.isLoading,
-    logoutMutation.error,
-    logoutMutation.isPending,
-  ]);
+    }),
+    [
+      meQuery.data,
+      meQuery.error,
+      meQuery.isLoading,
+      logoutMutation.error,
+      logoutMutation.isPending,
+    ]
+  );
+
+  // Side effect belongs in an effect, not the memo above — writing to
+  // localStorage during render is a React purity violation (double-fires
+  // under StrictMode, can run at unexpected times under concurrent
+  // rendering). This mirror only matters for Manus's own iframe-preview
+  // auto-login fallback anyway, not for a standalone deployment, but keeping
+  // it correct costs nothing.
+  useEffect(() => {
+    try {
+      localStorage.setItem("manus-runtime-user-info", JSON.stringify(meQuery.data));
+    } catch {
+      // Storage can throw (private browsing, quota) — never worth failing auth over.
+    }
+  }, [meQuery.data]);
 
   useEffect(() => {
     if (!redirectOnUnauthenticated) return;

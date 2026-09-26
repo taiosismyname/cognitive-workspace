@@ -286,14 +286,21 @@ export type ReconstructionCorpusConversation = {
   conversationId: number;
   title: string | null;
   createdAt: Date;
-  providerKey: string | null;
+  providerKey: string;
+  originType: "workspace" | "provider_import" | "manual_file_import";
   messages: Array<{ id: number; role: string; content: string }>;
 };
 
 // Loads the normalized corpus for one lane. When historyImportId is given the
-// corpus is scoped to that import; otherwise every imported conversation for
-// the user is included. providerKey travels with each conversation so the
-// reconstruction run records which source format(s) its state was derived from.
+// corpus is scoped to that import; otherwise EVERY conversation the user owns is
+// included — imported archives and conversations that happened inside this app.
+//
+// This is the growth loop: the join is a LEFT join from conversations, not an
+// inner join through conversationOrigins. Previously an inner join made
+// workspace-native conversations structurally invisible (they have no origin
+// row), so reconstruction could only ever see imported archives and never
+// learned from real use. A conversation with no origin row is labelled
+// `workspace`, which is exactly what it is.
 export async function loadCorpusForReconstruction(userId: number, historyImportId: number | null): Promise<ReconstructionCorpusConversation[]> {
   const db = await getDb();
   if (!db) return [];
@@ -301,8 +308,8 @@ export async function loadCorpusForReconstruction(userId: number, historyImportI
   if (historyImportId !== null) conditions.push(eq(conversationOrigins.historyImportId, historyImportId));
   const rows = await db
     .select({ conversation: conversations, origin: conversationOrigins })
-    .from(conversationOrigins)
-    .innerJoin(conversations, eq(conversationOrigins.conversationId, conversations.id))
+    .from(conversations)
+    .leftJoin(conversationOrigins, eq(conversationOrigins.conversationId, conversations.id))
     .where(and(...conditions))
     .orderBy(conversations.createdAt);
 
@@ -313,9 +320,31 @@ export async function loadCorpusForReconstruction(userId: number, historyImportI
       .from(conversationMessages)
       .where(eq(conversationMessages.conversationId, row.conversation.id))
       .orderBy(conversationMessages.id);
-    corpus.push({ conversationId: row.conversation.id, title: row.conversation.title, createdAt: row.conversation.createdAt, providerKey: row.origin.providerKey ?? null, messages });
+    // A conversation with no messages adds nothing to the corpus and would only
+    // cost prompt tokens; skip it rather than reconstructing from silence.
+    if (messages.length === 0) continue;
+    corpus.push({
+      conversationId: row.conversation.id,
+      title: row.conversation.title,
+      createdAt: row.conversation.createdAt,
+      providerKey: row.origin?.providerKey ?? "workspace",
+      originType: row.origin?.originType ?? "workspace",
+      messages,
+    });
   }
   return corpus;
+}
+
+// Gives a workspace-native conversation an explicit origin row. The corpus
+// loader no longer needs this (it left-joins), but it keeps provenance honest
+// in the continuity view: "said in this app" is visibly distinct from
+// "imported from a provider".
+export async function ensureWorkspaceOrigin(conversationId: number) {
+  const db = await getDb();
+  if (!db) return;
+  const existing = await db.select({ conversationId: conversationOrigins.conversationId }).from(conversationOrigins).where(eq(conversationOrigins.conversationId, conversationId)).limit(1);
+  if (existing[0]) return;
+  await db.insert(conversationOrigins).values({ conversationId, originType: "workspace", providerKey: "workspace" });
 }
 
 export async function createReconstructionRun(input: { userId: number; modelRegistryId: number; historyImportId: number | null; sourceSelectionJson: string; strategyVersion: string; inputManifestHash: string }) {

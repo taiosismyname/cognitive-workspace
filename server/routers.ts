@@ -4,7 +4,7 @@ import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { conversationMessages, conversations, councilResults, councilRuns, memories, modelRegistry } from "../drizzle/schema";
 import { cosineSimilarity, getAdapter, ProviderUnavailableError } from "./adapters";
-import { getDb, getCouncilResults, listConversations, listMemories, listMessages, listModels, listCouncilRuns, listProviderConnections, listHistoryImports, listStateSnapshots, listStateArtifacts, listArtifactSources, listImportedConversations, ownsConversation, ownsModel } from "./db";
+import { getDb, getCouncilResults, listConversations, listMemories, listMessages, listModels, listCouncilRuns, listProviderConnections, listHistoryImports, listStateSnapshots, listStateArtifacts, listArtifactSources, listImportedConversations, ensureWorkspaceOrigin, ownsConversation, ownsModel } from "./db";
 import { parseClaudeExport } from "./importers/claudeExport";
 import { ENTRIES_QUERY_DISPLAY_LABEL, ENTRIES_QUERY_SOURCE_FORMAT, parseEntriesQueryExport } from "./importers/entriesQueryExport";
 import { persistParsedImport } from "./importers/persistImport";
@@ -47,7 +47,12 @@ export const appRouter = router({
     createConversation: protectedProcedure.input(z.object({ title: z.string().min(1).max(255) })).mutation(async ({ ctx, input }) => {
       const db = requireDatabase(await getDb());
       const result = await db.insert(conversations).values({ userId: ctx.user.id, title: input.title });
-      return { id: Number(result[0].insertId), title: input.title };
+      const id = Number(result[0].insertId);
+      // Marks this as app-native history so the growth loop picks it up: every
+      // reconstruction now includes conversations that happened here, not just
+      // imported provider archives.
+      await ensureWorkspaceOrigin(id);
+      return { id, title: input.title };
     }),
     sendMessage: protectedProcedure.input(z.object({ conversationId: z.number().int().positive(), modelId: z.number().int().positive(), content: z.string().min(1) })).mutation(async ({ ctx, input }) => {
       if (!(await ownsConversation(ctx.user.id, input.conversationId))) throw new TRPCError({ code: "NOT_FOUND", message: "Conversation not found." });

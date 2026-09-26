@@ -109,11 +109,15 @@ export async function runReconstruction(input: {
   const inputManifestHash = sha256(
     corpus.map(c => ({ id: c.conversationId, messages: c.messages.map(m => m.id) })),
   );
-  const sourceFormatKeys = Array.from(new Set(corpus.map(c => c.providerKey).filter((key): key is string => Boolean(key))));
+  // Which sources this state was actually derived from — now including
+  // "workspace" when the corpus contains conversations that happened in-app.
+  const sourceFormatKeys = Array.from(new Set(corpus.map(c => c.providerKey)));
+  const liveConversationCount = corpus.filter(c => c.originType === "workspace").length;
   const sourceSelectionJson = JSON.stringify({
     historyImportId,
     conversationCount: corpus.length,
     messageCount: corpus.reduce((total, c) => total + c.messages.length, 0),
+    liveConversationCount,
     sourceFormatKeys,
   });
 
@@ -131,7 +135,7 @@ export async function runReconstruction(input: {
     const prompt = buildReconstructionPrompt({
       modelName: input.model.displayName,
       providerKey: input.model.providerKey,
-      corpus: corpus.map(c => ({ conversationId: c.conversationId, title: c.title, createdAt: c.createdAt, messages: c.messages })),
+      corpus: corpus.map(c => ({ conversationId: c.conversationId, title: c.title, createdAt: c.createdAt, source: c.providerKey, origin: c.originType, messages: c.messages })),
       previousState: priorStateForPrompt(prior, priorArtifacts),
     });
     const complete = input.complete ?? ((args: { modelKey: string; messages: ChatTurn[] }) => getAdapter(input.model.providerKey).complete(args));

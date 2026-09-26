@@ -1,10 +1,11 @@
 import DashboardLayout from "@/components/DashboardLayout";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { trpc } from "@/lib/trpc";
-import { AlertCircle, Archive, BrainCircuit, CheckCircle2, FileText, GitBranch, History, Link2, ShieldCheck, Sparkles } from "lucide-react";
-import { useState } from "react";
+import { AlertCircle, Archive, BrainCircuit, CheckCircle2, FileText, GitBranch, History, Link2, ShieldCheck, Sparkles, Upload } from "lucide-react";
+import { useState, type ChangeEvent } from "react";
 
 function formatDate(value: Date | string | null | undefined) {
   if (!value) return "Not recorded";
@@ -67,7 +68,7 @@ function ContinuityContent() {
       <div>
         <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.24em] text-[#789381]"><span className="size-2 rounded-full bg-[#72a77d]" /> External model continuity</div>
         <h1 className="max-w-3xl text-4xl font-semibold tracking-[-0.04em] text-[#16211f] md:text-5xl">See what a model can actually carry forward.</h1>
-        <p className="mt-4 max-w-2xl text-sm leading-6 text-[#6d7772]">This is a read-only view of the continuity machinery: provider connections, imported source history, versioned external state, derived memories, and the evidence available for future reconstruction.</p>
+        <p className="mt-4 max-w-2xl text-sm leading-6 text-[#6d7772]">Import a provider export, reconstruct a model lane from it, and inspect the resulting versioned state: provider connections, imported source history, derived memories, and the evidence behind every artifact.</p>
       </div>
       <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center"><label className="flex items-center gap-2 rounded-2xl border border-black/5 bg-white px-3 py-2 text-xs shadow-sm"><span className="font-medium text-muted-foreground">Model lane</span><select value={selectedModel?.id ?? ""} onChange={event => setSelectedModelId(event.target.value ? Number(event.target.value) : undefined)} className="max-w-48 bg-transparent font-medium outline-none" aria-label="Select model continuity lane"><option value="">No model selected</option>{models.map(model => <option key={model.id} value={model.id}>{model.displayName}</option>)}</select></label><div className="flex items-center gap-2 rounded-2xl border border-black/5 bg-white px-3 py-2 text-xs shadow-sm"><ShieldCheck className="size-4 text-[#679576]" /><span className="font-medium">No source history is overwritten</span></div></div>
     </header>
@@ -78,6 +79,8 @@ function ContinuityContent() {
       <Metric icon={Archive} label="History imports" value={imports.length} detail="Source-preserving jobs" />
       <Metric icon={History} label="State versions" value={snapshots.length} detail="Never silently overwritten" />
     </section>
+
+    <div className="mt-6"><ImportAndReconstruct models={models} /></div>
 
     <div className="mt-6 grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
       <Card className="border-0 bg-[#16211f] text-white shadow-[0_20px_60px_rgba(21,39,33,0.14)]"><CardContent className="p-8 md:p-10"><Badge className="border-0 bg-[#d8f0df]/15 text-[#d8f0df]">Reconstructable context</Badge><h2 className="mt-6 text-2xl font-semibold tracking-[-0.03em]">What can be supplied to a model right now?</h2><p className="mt-4 max-w-2xl text-sm leading-7 text-white/65">Only state that is already published or marked current can be treated as continuity context. The panel below is intentionally honest: if no published snapshot exists, the UI does not invent one.</p><div className="mt-7 rounded-2xl border border-white/10 bg-white/5 p-5"><div className="flex items-center justify-between gap-4"><span className="text-xs uppercase tracking-[0.18em] text-white/45">Current lane</span>{current ? <StatusPill status={current.status} good={current.status === "published"} /> : <StatusPill status="No published state" />}</div><p className="mt-3 text-lg font-medium">{currentModel?.displayName ?? "No model state selected"}</p><p className="mt-1 text-xs text-white/50">{currentModel ? `${currentModel.providerKey} · ${currentModel.modelKey}` : "A reconstruction snapshot is required before continuity can be supplied."}</p>{summary && <div className="mt-5 space-y-2 text-sm text-white/75">{Object.entries(summary).slice(0, 5).map(([key, value]) => <div key={key} className="flex gap-3 border-t border-white/10 pt-2"><span className="min-w-28 text-white/40">{key}</span><span className="line-clamp-3">{typeof value === "string" ? value : JSON.stringify(value)}</span></div>)}</div>}{!summary && <p className="mt-5 text-sm text-white/55">No state summary is stored in the current snapshot. Imported sources and derived memories remain inspectable below, but no reconstructed context is claimed.</p>}{reconstructableEvidence && <details className="mt-5 rounded-xl border border-white/10 bg-black/10 p-4"><summary className="cursor-pointer text-xs font-semibold uppercase tracking-[0.16em] text-white/60">Exact persisted evidence payload</summary><pre className="mt-4 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] leading-5 text-white/70">{JSON.stringify(reconstructableEvidence, null, 2)}</pre></details>}</div></CardContent></Card>
@@ -96,6 +99,88 @@ function ContinuityContent() {
 
     <p className="mt-7 text-xs leading-5 text-muted-foreground">This surface reports only persisted data returned by the existing APIs. It does not imply that a provider-native history connection or model reconstruction exists when the underlying records are absent.</p>
   </div>;
+}
+
+// The two actions that make this page writable: import a provider export into
+// the normalized corpus, then ask a model to reconstruct its own lane from it.
+// Both call the same procedures the backend already exposes; nothing here
+// invents state — a snapshot only appears if the model actually returned one.
+function ImportAndReconstruct({ models }: { models: Array<{ id: number; displayName: string }> }) {
+  const utils = trpc.useUtils();
+  const [format, setFormat] = useState<"entries_query" | "claude">("entries_query");
+  const [fileName, setFileName] = useState("");
+  const [raw, setRaw] = useState<unknown>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [modelId, setModelId] = useState<number | undefined>(undefined);
+
+  const refresh = () => {
+    utils.continuity.overview.invalidate();
+    utils.workspace.overview.invalidate();
+  };
+  const succeed = (text: string) => { setMessage(text); setError(null); refresh(); };
+  const fail = (text: string) => { setError(text); setMessage(null); };
+
+  const importClaude = trpc.continuity.importClaudeExport.useMutation({
+    onSuccess: data => succeed(`Imported ${data.conversationsImported} conversations and ${data.messagesImported} messages from a Claude export (${data.duplicatesSkipped} duplicate turns skipped).`),
+    onError: err => fail(err.message),
+  });
+  const importEntries = trpc.continuity.importEntriesQueryExport.useMutation({
+    onSuccess: data => succeed(`Imported ${data.conversationsImported} conversations and ${data.messagesImported} messages from an entries/query export (${data.duplicatesSkipped} duplicate turns skipped).`),
+    onError: err => fail(err.message),
+  });
+  const reconstruct = trpc.continuity.reconstruct.useMutation({
+    onSuccess: data => succeed(`Published snapshot v${data.version} — ${data.artifactCount} artifacts, ${data.citationCount} source citations, from ${data.sourceFormatKeys.join(", ") || "imported corpus"}.`),
+    onError: err => fail(err.message),
+  });
+
+  const busy = importClaude.isPending || importEntries.isPending || reconstruct.isPending;
+
+  const onFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setFileName(file.name); setError(null); setMessage(null);
+    try {
+      setRaw(JSON.parse(await file.text()));
+    } catch {
+      setRaw(null); fail("That file is not valid JSON.");
+    }
+  };
+
+  const runImport = () => {
+    if (raw === null) { fail("Choose a JSON export first."); return; }
+    const sourceFileName = fileName || (format === "claude" ? "claude-export.json" : "entries-query-export.json");
+    if (format === "claude") importClaude.mutate({ raw, sourceFileName });
+    else importEntries.mutate({ raw, sourceFileName });
+  };
+
+  return <Card className="border-0 bg-white shadow-sm">
+    <CardHeader><CardTitle className="flex items-center gap-2 text-base"><Upload className="size-4 text-[#679576]" /> Import an export and reconstruct</CardTitle></CardHeader>
+    <CardContent className="grid gap-6 md:grid-cols-2">
+      <div className="space-y-3">
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#789381]">1 · Import provider history</p>
+        <label className="flex items-center gap-2 text-xs"><span className="font-medium text-muted-foreground">Format</span>
+          <select value={format} onChange={event => setFormat(event.target.value as "entries_query" | "claude")} className="rounded-lg border border-black/10 bg-white px-2 py-1">
+            <option value="entries_query">entries / query</option>
+            <option value="claude">Claude.ai export</option>
+          </select>
+        </label>
+        <input type="file" accept="application/json,.json" onChange={onFile} className="block w-full text-xs" />
+        <p className="text-xs text-muted-foreground">{fileName ? `Selected: ${fileName}` : "Choose a .json export. Existing conversations are de-duplicated by native id."}</p>
+        <Button onClick={runImport} disabled={busy || raw === null} className="rounded-xl bg-[#16211f] hover:bg-[#263a35]">{importClaude.isPending || importEntries.isPending ? "Importing…" : "Import export"}</Button>
+      </div>
+      <div className="space-y-3">
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#789381]">2 · Reconstruct this lane</p>
+        <select value={modelId ?? ""} onChange={event => setModelId(event.target.value ? Number(event.target.value) : undefined)} className="w-full rounded-lg border border-black/10 bg-white px-2 py-1 text-xs">
+          <option value="">Select a registered model…</option>
+          {models.map(model => <option key={model.id} value={model.id}>{model.displayName}</option>)}
+        </select>
+        <Button onClick={() => (modelId ? reconstruct.mutate({ modelId }) : fail("Register and select a model first."))} disabled={busy} className="rounded-xl bg-[#16211f] hover:bg-[#263a35]">{reconstruct.isPending ? "Reconstructing…" : "Run reconstruction"}</Button>
+        <p className="text-xs text-muted-foreground">Reads the imported corpus for the selected lane, calls that model through its provider adapter, and publishes a new versioned snapshot — retiring <span className="font-medium">current</span> on the previous one.</p>
+      </div>
+      {(message || error) && <div className="md:col-span-2">{error ? <p className="text-sm text-red-600">{error}</p> : <p className="text-sm text-[#477458]">{message}</p>}</div>}
+    </CardContent>
+  </Card>;
 }
 
 function Metric({ icon: Icon, label, value, detail }: { icon: typeof BrainCircuit; label: string; value: number; detail: string }) { return <Card className="border-0 bg-white shadow-[0_12px_40px_rgba(27,47,39,0.06)]"><CardContent className="p-5"><div className="mb-5 flex items-center justify-between"><span className="text-xs font-medium text-muted-foreground">{label}</span><span className="grid size-9 place-items-center rounded-xl bg-[#edf4ee] text-[#5d876b]"><Icon className="size-4" /></span></div><div className="text-3xl font-semibold tracking-tight text-[#16211f]">{value}</div><p className="mt-1 text-xs text-muted-foreground">{detail}</p></CardContent></Card>; }

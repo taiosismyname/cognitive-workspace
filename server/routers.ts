@@ -4,8 +4,11 @@ import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { conversationMessages, conversations, councilResults, councilRuns, memories, modelRegistry } from "../drizzle/schema";
 import { cosineSimilarity, getAdapter, ProviderUnavailableError } from "./adapters";
-import { getDb, getCouncilResults, listConversations, listMemories, listMessages, listModels, listCouncilRuns, listProviderConnections, listHistoryImports, listStateSnapshots, listStateArtifacts, listArtifactSources, listImportedConversations, getOrCreateProviderConnection, createHistoryImport, completeHistoryImport, findExistingConversationByNativeId, findExistingMessageNativeIds, insertImportedConversation, insertImportedMessages, ownsConversation, ownsModel } from "./db";
+import { getDb, getCouncilResults, listConversations, listMemories, listMessages, listModels, listCouncilRuns, listProviderConnections, listHistoryImports, listStateSnapshots, listStateArtifacts, listArtifactSources, listImportedConversations, ownsConversation, ownsModel } from "./db";
 import { parseClaudeExport } from "./importers/claudeExport";
+import { ENTRIES_QUERY_DISPLAY_LABEL, ENTRIES_QUERY_SOURCE_FORMAT, parseEntriesQueryExport } from "./importers/entriesQueryExport";
+import { persistParsedImport } from "./importers/persistImport";
+import { runReconstruction } from "./reconstruction";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { ENV } from "./_core/env";
 import { systemRouter } from "./_core/systemRouter";
@@ -175,38 +178,33 @@ export const appRouter = router({
       .input(z.object({ raw: z.unknown(), sourceFileName: z.string() }))
       .mutation(async ({ ctx, input }) => {
         const { conversations: parsed, stats } = parseClaudeExport(input.raw);
-        const connection = await getOrCreateProviderConnection(ctx.user.id, "claude", "Claude.ai export");
-        if (!connection) throw new Error("Database unavailable");
-        const historyImport = await createHistoryImport(ctx.user.id, connection.id, input.sourceFileName);
-        if (!historyImport) throw new Error("Database unavailable");
-
-        let conversationsImported = 0;
-        let messagesImported = 0;
-        let duplicatesSkipped = 0;
-
+        const result = await persistParsedImport({ userId: ctx.user.id, providerKey: "claude", displayLabel: "Claude.ai export", sourceFileName: input.sourceFileName, conversationsSeen: stats.conversationsSeen, parsed });
+        return { ...result, parseStats: stats };
+      }),
+    // Second labelled source, for the entries/query archive shape. Deliberately
+    // a distinct provider key so a later real Claude export is added as another
+    // source rather than silently relabelled onto this one.
+    importEntriesQueryExport: protectedProcedure
+      .input(z.object({ raw: z.unknown(), sourceFileName: z.string() }))
+      .mutation(async ({ ctx, input }) => {
+        const { conversations: parsed, stats } = parseEntriesQueryExport(input.raw);
+        const result = await persistParsedImport({ userId: ctx.user.id, providerKey: ENTRIES_QUERY_SOURCE_FORMAT, displayLabel: ENTRIES_QUERY_DISPLAY_LABEL, sourceFileName: input.sourceFileName, conversationsSeen: stats.conversationsSeen, parsed });
+        return { ...result, sourceFormat: ENTRIES_QUERY_SOURCE_FORMAT, parseStats: stats };
+      }),
+    // The reconstruction call: load the lane's imported corpus, ask the lane's
+    // model to reconstruct its own continuity state, and publish a new versioned
+    // snapshot (retiring is_current on the previous one). Returns the published
+    // snapshot so the caller can read it back immediately.
+    reconstruct: protectedProcedure
+      .input(z.object({ modelId: z.number().int().positive(), historyImportId: z.number().int().positive().optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const model = await ownsModel(ctx.user.id, input.modelId);
+        if (!model) throw new TRPCError({ code: "NOT_FOUND", message: "Model not found." });
         try {
-          for (const conv of parsed) {
-            let conversationId = await findExistingConversationByNativeId(connection.id, conv.nativeConversationId);
-            if (conversationId) {
-              duplicatesSkipped += 1;
-            } else {
-              conversationId = await insertImportedConversation(ctx.user.id, connection.id, historyImport.id, "claude", conv);
-              conversationsImported += 1;
-            }
-            if (!conversationId) continue;
-
-            const existingMessageIds = await findExistingMessageNativeIds(conversationId);
-            const newMessages = conv.messages.filter(m => !existingMessageIds.has(m.nativeMessageId));
-            duplicatesSkipped += conv.messages.length - newMessages.length;
-            messagesImported += await insertImportedMessages(conversationId, historyImport.id, newMessages);
-          }
-          await completeHistoryImport(historyImport.id, { conversationsDiscovered: stats.conversationsSeen, conversationsImported, messagesImported, duplicatesSkipped }, "completed");
+          return await runReconstruction({ userId: ctx.user.id, model, historyImportId: input.historyImportId ?? null });
         } catch (error) {
-          await completeHistoryImport(historyImport.id, { conversationsDiscovered: stats.conversationsSeen, conversationsImported, messagesImported, duplicatesSkipped }, "failed", error instanceof Error ? error.message : String(error));
-          throw error;
+          throw new TRPCError({ code: "BAD_GATEWAY", message: error instanceof Error ? error.message : "Reconstruction failed." });
         }
-
-        return { historyImportId: historyImport.id, conversationsImported, messagesImported, duplicatesSkipped, parseStats: stats };
       }),
   }),
 });

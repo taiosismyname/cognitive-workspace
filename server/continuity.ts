@@ -97,7 +97,9 @@ export function parseStateArtifacts(rawResponse: string): { summary: string; art
 }
 
 export function buildReconstructionPrompt(input: { modelName: string; providerKey: string; corpus: unknown; previousState?: unknown }) {
-  return `You are reconstructing your own continuity state for the model lane named ${input.modelName} (${input.providerKey}). This is not a generic memory extraction task. Read the supplied provider-native conversation archive as if you had been present for it. Tie together recurring themes, unresolved threads, decisions, preferences, projects, contradictions, and likely next steps. Preserve uncertainty instead of inventing certainty. Do not merge identities or memories from any other model.
+  return `You are reconstructing your own continuity state for the model lane named ${input.modelName} (${input.providerKey}). This is not a generic memory extraction task. Read the supplied conversation archive as if you had been present for it. Tie together recurring themes, unresolved threads, decisions, preferences, projects, contradictions, and likely next steps. Preserve uncertainty instead of inventing certainty. Do not merge identities or memories from any other model.
+
+The archive may mix provider-native history (each conversation's \`source\` names the import format, e.g. \`entries_query\` or \`claude\`) with conversations that happened inside this workspace (\`source: "workspace"\`). Both are your own record and should be weighed together; when something appears only in the live workspace, prefer it as more recent than the imported archive.
 
 Return ONLY valid JSON with this shape:
 {

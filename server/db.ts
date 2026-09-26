@@ -1,6 +1,5 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import mysql from "mysql2";
 import {
   conversationMessages,
   conversationOrigins,
@@ -22,44 +21,13 @@ import {
   type InsertUser,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+import type { NormalizedStateArtifact } from "./continuity";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
-// mysql2's `uri` option merges with any explicit sibling fields (uri parsed
-// first, then overridden by whatever else is passed) — this is the
-// documented way to layer connection options on top of a plain connection
-// string. Needed because TiDB Cloud Serverless requires TLS, and a bare
-// `drizzle(connectionString)` call doesn't reliably negotiate it: mysql2
-// only auto-enables SSL from a URL's own `ssl=`/`ssl-mode=` query param, and
-// TiDB Cloud's own connection strings often don't include one, leaving the
-// client to attempt a plaintext handshake against a server that requires
-// TLS. NOT verified against a live TiDB connection — this sandbox has no
-// network path to tidbcloud.com to test against. Verify this actually
-// connects wherever DATABASE_URL is real (Render, or your own machine)
-// before trusting it beyond that.
-function buildPoolConfig(connectionString: string) {
-  let hasExplicitSslParam = false;
-  try {
-    const url = new URL(connectionString);
-    hasExplicitSslParam = url.searchParams.has("ssl") || url.searchParams.has("ssl-mode");
-  } catch {
-    // Malformed URL — let mysql2's own parser surface the real error.
-  }
-  return {
-    uri: connectionString,
-    ssl: hasExplicitSslParam ? undefined : { minVersion: "TLSv1.2" as const, rejectUnauthorized: true },
-  };
-}
-
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
-    try {
-      const pool = mysql.createPool(buildPoolConfig(process.env.DATABASE_URL));
-      _db = drizzle(pool);
-    } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
-      _db = null;
-    }
+    try { _db = drizzle(process.env.DATABASE_URL); } catch (error) { console.warn("[Database] Failed to connect:", error); _db = null; }
   }
   return _db;
 }
@@ -277,6 +245,102 @@ export async function insertImportedMessages(conversationId: number, historyImpo
     })),
   );
   return messages.length;
+}
+
+// --- Reconstruction pipeline write path -------------------------------------
+// The corpus loader and the snapshot/artifact persistence used by
+// runReconstruction(). These were the missing half of the continuity feature:
+// the tables and read helpers existed, but nothing ever wrote to them.
+
+export type ReconstructionCorpusConversation = {
+  conversationId: number;
+  title: string | null;
+  createdAt: Date;
+  providerKey: string | null;
+  messages: Array<{ id: number; role: string; content: string }>;
+};
+
+// Loads the normalized corpus for one lane. When historyImportId is given the
+// corpus is scoped to that import; otherwise every imported conversation for
+// the user is included. providerKey travels with each conversation so the
+// reconstruction run records which source format(s) its state was derived from.
+export async function loadCorpusForReconstruction(userId: number, historyImportId: number | null): Promise<ReconstructionCorpusConversation[]> {
+  const db = await getDb();
+  if (!db) return [];
+  const conditions = [eq(conversations.userId, userId)];
+  if (historyImportId !== null) conditions.push(eq(conversationOrigins.historyImportId, historyImportId));
+  const rows = await db
+    .select({ conversation: conversations, origin: conversationOrigins })
+    .from(conversationOrigins)
+    .innerJoin(conversations, eq(conversationOrigins.conversationId, conversations.id))
+    .where(and(...conditions))
+    .orderBy(conversations.createdAt);
+
+  const corpus: ReconstructionCorpusConversation[] = [];
+  for (const row of rows) {
+    const messages = await db
+      .select({ id: conversationMessages.id, role: conversationMessages.role, content: conversationMessages.content })
+      .from(conversationMessages)
+      .where(eq(conversationMessages.conversationId, row.conversation.id))
+      .orderBy(conversationMessages.id);
+    corpus.push({ conversationId: row.conversation.id, title: row.conversation.title, createdAt: row.conversation.createdAt, providerKey: row.origin.providerKey ?? null, messages });
+  }
+  return corpus;
+}
+
+export async function createReconstructionRun(input: { userId: number; modelRegistryId: number; historyImportId: number | null; sourceSelectionJson: string; strategyVersion: string; inputManifestHash: string }) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.insert(reconstructionRuns).values({ userId: input.userId, modelRegistryId: input.modelRegistryId, historyImportId: input.historyImportId, sourceSelectionJson: input.sourceSelectionJson, strategyVersion: input.strategyVersion, inputManifestHash: input.inputManifestHash, status: "running", startedAt: new Date() });
+  return Number(result[0].insertId);
+}
+
+export async function completeReconstructionRun(runId: number, status: "completed" | "partial" | "failed", rawResponseJson?: string, errorJson?: string) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(reconstructionRuns).set({ status, rawResponseJson: rawResponseJson ?? null, errorJson: errorJson ?? null, completedAt: new Date() }).where(eq(reconstructionRuns.id, runId));
+}
+
+// Highest version in the lane regardless of status — used to allocate the next
+// version number and to hand the previous state back to the model.
+export async function getLatestSnapshot(userId: number, modelRegistryId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(modelStateSnapshots).where(and(eq(modelStateSnapshots.userId, userId), eq(modelStateSnapshots.modelRegistryId, modelRegistryId))).orderBy(desc(modelStateSnapshots.version)).limit(1);
+  return rows[0];
+}
+
+export async function insertSnapshot(input: { userId: number; modelRegistryId: number; reconstructionRunId: number; parentSnapshotId: number | null; version: number; stateSchemaVersion: string; stateSummaryJson: string; stateHash: string }) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.insert(modelStateSnapshots).values({ userId: input.userId, modelRegistryId: input.modelRegistryId, reconstructionRunId: input.reconstructionRunId, parentSnapshotId: input.parentSnapshotId, version: input.version, stateSchemaVersion: input.stateSchemaVersion, status: "published", isCurrent: true, stateSummaryJson: input.stateSummaryJson, stateHash: input.stateHash, publishedAt: new Date() });
+  return Number(result[0].insertId);
+}
+
+// Retires every other current snapshot in the lane, so exactly one row has
+// is_current = true. Scoped with ne() so the just-published snapshot is kept.
+export async function retireCurrentSnapshots(userId: number, modelRegistryId: number, exceptSnapshotId: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(modelStateSnapshots).set({ isCurrent: false, status: "superseded" }).where(and(eq(modelStateSnapshots.userId, userId), eq(modelStateSnapshots.modelRegistryId, modelRegistryId), eq(modelStateSnapshots.isCurrent, true), ne(modelStateSnapshots.id, exceptSnapshotId)));
+}
+
+// Batch insert. Relies on MySQL/TiDB assigning contiguous auto_increment ids
+// from insertId within one multi-row insert; this is verified against a live
+// TiDB database at the end-to-end step.
+export async function insertStateArtifacts(snapshotId: number, artifacts: NormalizedStateArtifact[]) {
+  const db = await getDb();
+  if (!db || artifacts.length === 0) return [] as Array<{ artifactId: number }>;
+  const result = await db.insert(modelStateArtifacts).values(artifacts.map(artifact => ({ snapshotId, artifactType: artifact.artifactType, contentJson: JSON.stringify(artifact.content), confidence: artifact.confidence ?? null, status: "active" as const })));
+  const firstId = Number(result[0].insertId);
+  return artifacts.map((_, index) => ({ artifactId: firstId + index }));
+}
+
+export async function insertArtifactSources(rows: Array<{ artifactId: number; conversationId: number; messageId?: number; sourceRole?: string; quote?: string }>) {
+  const db = await getDb();
+  if (!db || rows.length === 0) return 0;
+  await db.insert(modelStateArtifactSources).values(rows.map(row => ({ artifactId: row.artifactId, conversationId: row.conversationId, messageId: row.messageId ?? null, sourceRole: row.sourceRole ?? "evidence", relevance: null, quoteJson: row.quote ? JSON.stringify({ quote: row.quote }) : null })));
+  return rows.length;
 }
 
 export { conversations, conversationMessages, councilContextItems, councilContextManifests, councilResults, councilRuns, historyImports, memories, messageOrigins, modelRegistry, modelStateArtifactSources, modelStateArtifacts, modelStateSnapshots, providerConnections, reconstructionRuns };

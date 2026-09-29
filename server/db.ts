@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, count, desc, eq, inArray, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import mysql from "mysql2";
 import {
@@ -400,6 +400,44 @@ export async function insertArtifactSources(rows: Array<{ artifactId: number; co
   if (!db || rows.length === 0) return 0;
   await db.insert(modelStateArtifactSources).values(rows.map(row => ({ artifactId: row.artifactId, conversationId: row.conversationId, messageId: row.messageId ?? null, sourceRole: row.sourceRole ?? "evidence", relevance: null, quoteJson: row.quote ? JSON.stringify({ quote: row.quote }) : null })));
   return rows.length;
+}
+
+// --- Automatic reconstruction triggers ---------------------------------------
+
+// How much corpus material currently exists for a user, in messages. This is
+// the same scope the corpus loader uses, so the delta measured here is exactly
+// the delta a reconstruction would consume.
+export async function countCorpusMessages(userId: number): Promise<number> {
+  const db = await getDb();
+  if (!db) return 0;
+  const rows = await db
+    .select({ value: count() })
+    .from(conversationMessages)
+    .innerJoin(conversations, eq(conversationMessages.conversationId, conversations.id))
+    .where(eq(conversations.userId, userId));
+  return Number(rows[0]?.value ?? 0);
+}
+
+// The most recent successful reconstruction for a lane — its recorded
+// messageCount is the baseline the auto-trigger measures against.
+export async function getLatestReconstructionRun(userId: number, modelRegistryId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db
+    .select()
+    .from(reconstructionRuns)
+    .where(and(eq(reconstructionRuns.userId, userId), eq(reconstructionRuns.modelRegistryId, modelRegistryId), eq(reconstructionRuns.status, "completed")))
+    .orderBy(desc(reconstructionRuns.createdAt))
+    .limit(1);
+  return rows[0];
+}
+
+// Every lane that could be auto-reconstructed (active models). Used by the
+// scheduled trigger, which has no single user context.
+export async function listActiveModelLanes() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(modelRegistry).where(eq(modelRegistry.adapterStatus, "active"));
 }
 
 export { conversations, conversationMessages, councilContextItems, councilContextManifests, councilResults, councilRuns, historyImports, memories, messageOrigins, modelRegistry, modelStateArtifactSources, modelStateArtifacts, modelStateSnapshots, providerConnections, reconstructionRuns };

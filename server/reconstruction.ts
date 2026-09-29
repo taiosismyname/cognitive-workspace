@@ -87,6 +87,97 @@ function priorStateForPrompt(prior: { version: number; stateSummaryJson: string 
   };
 }
 
+export const AUTO_RECONSTRUCT_DEFAULT_THRESHOLD = 8;
+
+// Reads the auto-trigger threshold from the environment. 0 disables the
+// automatic path entirely, so reconstructing deliberately stays possible.
+export function autoReconstructThreshold(env: string | undefined = process.env.AUTO_RECONSTRUCT_MESSAGES): number {
+  // Treat unset AND empty/whitespace as "use the default". Without this, an
+  // empty env var would parse as Number("") === 0 and silently disable the
+  // feature — a footgun, since "0" is the only value that should mean disabled.
+  const raw = (env ?? "").trim();
+  if (raw === "") return AUTO_RECONSTRUCT_DEFAULT_THRESHOLD;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return AUTO_RECONSTRUCT_DEFAULT_THRESHOLD;
+  return Math.floor(parsed);
+}
+
+// Pure threshold decision — testable without a database.
+export function shouldAutoReconstruct(input: { lastMessageCount: number | null; currentMessageCount: number; threshold: number }): boolean {
+  if (input.threshold <= 0) return false;
+  const baseline = input.lastMessageCount ?? 0;
+  return input.currentMessageCount - baseline >= input.threshold;
+}
+
+function recordedMessageCount(sourceSelectionJson: string | null): number | null {
+  if (!sourceSelectionJson) return null;
+  try {
+    const parsed = JSON.parse(sourceSelectionJson) as { messageCount?: unknown };
+    return typeof parsed.messageCount === "number" ? parsed.messageCount : null;
+  } catch {
+    return null;
+  }
+}
+
+// Guards against two auto-runs for one lane racing each other (a burst of
+// messages can arrive while a reconstruction is still in flight).
+const autoRunsInFlight = new Set<string>();
+
+export type AutoReconstructOutcome = { triggered: boolean; reason: string; version?: number };
+
+// Fire-and-forget auto-reconstruction for one lane. Deliberately never throws:
+// its caller is a request handler that must not fail a chat reply because a
+// background model call had a bad day.
+export async function maybeAutoReconstruct(userId: number, model: ReconstructionModel): Promise<AutoReconstructOutcome> {
+  const threshold = autoReconstructThreshold();
+  if (threshold <= 0) return { triggered: false, reason: "auto-reconstruction disabled" };
+  if (model.adapterStatus !== "active") return { triggered: false, reason: `model is ${model.adapterStatus}` };
+
+  const key = `${userId}:${model.id}`;
+  if (autoRunsInFlight.has(key)) return { triggered: false, reason: "a run is already in flight" };
+  autoRunsInFlight.add(key);
+
+  try {
+    const currentMessageCount = await db.countCorpusMessages(userId);
+    const lastRun = await db.getLatestReconstructionRun(userId, model.id);
+    const lastMessageCount = recordedMessageCount(lastRun?.sourceSelectionJson ?? null);
+    if (!shouldAutoReconstruct({ lastMessageCount, currentMessageCount, threshold })) {
+      return { triggered: false, reason: `${currentMessageCount - (lastMessageCount ?? 0)} new messages, below threshold ${threshold}` };
+    }
+    const result = await runReconstruction({ userId, model });
+    return { triggered: true, reason: "message threshold reached", version: result.version };
+  } catch (error) {
+    console.warn("[auto-reconstruct] failed:", error instanceof Error ? error.message : error);
+    return { triggered: false, reason: "reconstruction failed" };
+  } finally {
+    autoRunsInFlight.delete(key);
+  }
+}
+
+// Scheduled variant: no user context, so it scans active lanes and reconstructs
+// those with enough new material, bounded per invocation to cap model spend.
+export async function scheduledReconstruction(limit = 5): Promise<{ considered: number; reconstructed: Array<{ userId: number; modelId: number; version: number }>; skipped: number }> {
+  const threshold = autoReconstructThreshold();
+  const lanes = threshold <= 0 ? [] : await db.listActiveModelLanes();
+  const reconstructed: Array<{ userId: number; modelId: number; version: number }> = [];
+  let skipped = 0;
+  for (const model of lanes) {
+    if (reconstructed.length >= limit) break;
+    try {
+      const currentMessageCount = await db.countCorpusMessages(model.userId);
+      const lastRun = await db.getLatestReconstructionRun(model.userId, model.id);
+      const lastMessageCount = recordedMessageCount(lastRun?.sourceSelectionJson ?? null);
+      if (!shouldAutoReconstruct({ lastMessageCount, currentMessageCount, threshold })) { skipped += 1; continue; }
+      const result = await runReconstruction({ userId: model.userId, model });
+      reconstructed.push({ userId: model.userId, modelId: model.id, version: result.version });
+    } catch (error) {
+      console.warn("[scheduled-reconstruct] skipped a lane:", error instanceof Error ? error.message : error);
+      skipped += 1;
+    }
+  }
+  return { considered: lanes.length, reconstructed, skipped };
+}
+
 export async function runReconstruction(input: {
   userId: number;
   model: ReconstructionModel;

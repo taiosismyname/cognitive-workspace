@@ -5,6 +5,7 @@ import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerLocalAuthRoutes } from "./localAuth";
 import { registerStorageProxy } from "./storageProxy";
+import { scheduledReconstruction } from "../reconstruction";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
@@ -28,6 +29,27 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 
+// Scheduled reconstruction trigger. A free host spins down when idle, so this
+// is meant to be driven by an external scheduler that both wakes the service
+// and calls it. Bearer-protected; returns 401 (and does nothing) if CRON_SECRET
+// is not configured, so the endpoint is inert by default.
+function registerCronRoutes(app: express.Express) {
+  app.post("/api/cron/reconstruct", async (req, res) => {
+    const secret = process.env.CRON_SECRET ?? "";
+    const provided = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+    if (!secret || provided !== secret) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    try {
+      const result = await scheduledReconstruction();
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+}
+
 async function startServer() {
   const app = express();
   const server = createServer(app);
@@ -38,6 +60,7 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "200mb", extended: true }));
   registerStorageProxy(app);
   registerLocalAuthRoutes(app);
+  registerCronRoutes(app);
   // tRPC API
   app.use(
     "/api/trpc",

@@ -80,7 +80,7 @@ function ContinuityContent() {
       <Metric icon={History} label="State versions" value={snapshots.length} detail="Never silently overwritten" />
     </section>
 
-    <div className="mt-6"><ImportAndReconstruct models={models} corpusCount={conversations.length} /></div>
+    <div className="mt-6"><ImportAndReconstruct models={models} corpusCount={conversations.length} autoAfter={workspace.data?.integration?.autoReconstructMessages ?? 0} /></div>
 
     <div className="mt-6 grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
       <Card className="border-0 bg-[#16211f] text-white shadow-[0_20px_60px_rgba(21,39,33,0.14)]"><CardContent className="p-8 md:p-10"><Badge className="border-0 bg-[#d8f0df]/15 text-[#d8f0df]">Reconstructable context</Badge><h2 className="mt-6 text-2xl font-semibold tracking-[-0.03em]">What can be supplied to a model right now?</h2><p className="mt-4 max-w-2xl text-sm leading-7 text-white/65">Only state that is already published or marked current can be treated as continuity context. The panel below is intentionally honest: if no published snapshot exists, the UI does not invent one.</p><div className="mt-7 rounded-2xl border border-white/10 bg-white/5 p-5"><div className="flex items-center justify-between gap-4"><span className="text-xs uppercase tracking-[0.18em] text-white/45">Current lane</span>{current ? <StatusPill status={current.status} good={current.status === "published"} /> : <StatusPill status="No published state" />}</div><p className="mt-3 text-lg font-medium">{currentModel?.displayName ?? "No model state selected"}</p><p className="mt-1 text-xs text-white/50">{currentModel ? `${currentModel.providerKey} · ${currentModel.modelKey}` : "A reconstruction snapshot is required before continuity can be supplied."}</p>{summary && <div className="mt-5 space-y-2 text-sm text-white/75">{Object.entries(summary).slice(0, 5).map(([key, value]) => <div key={key} className="flex gap-3 border-t border-white/10 pt-2"><span className="min-w-28 text-white/40">{key}</span><span className="line-clamp-3">{typeof value === "string" ? value : JSON.stringify(value)}</span></div>)}</div>}{!summary && <p className="mt-5 text-sm text-white/55">No state summary is stored in the current snapshot. Imported sources and derived memories remain inspectable below, but no reconstructed context is claimed.</p>}{reconstructableEvidence && <details className="mt-5 rounded-xl border border-white/10 bg-black/10 p-4"><summary className="cursor-pointer text-xs font-semibold uppercase tracking-[0.16em] text-white/60">Exact persisted evidence payload</summary><pre className="mt-4 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] leading-5 text-white/70">{JSON.stringify(reconstructableEvidence, null, 2)}</pre></details>}</div></CardContent></Card>
@@ -107,7 +107,7 @@ function ContinuityContent() {
 // invents state — a snapshot only appears if the model actually returned one.
 const PASTED_HINT = "Start each turn with a role label and a colon — “User:” or “Assistant:” (also Human / AI / Claude / ChatGPT / Gemini / System). Content continues until the next label.";
 
-function ImportAndReconstruct({ models, corpusCount }: { models: Array<{ id: number; displayName: string }>; corpusCount: number }) {
+function ImportAndReconstruct({ models, corpusCount, autoAfter }: { models: Array<{ id: number; displayName: string }>; corpusCount: number; autoAfter: number }) {
   const utils = trpc.useUtils();
   const [format, setFormat] = useState<"entries_query" | "claude" | "pasted_transcript">("entries_query");
   const [fileName, setFileName] = useState("");
@@ -198,6 +198,7 @@ function ImportAndReconstruct({ models, corpusCount }: { models: Array<{ id: num
         <Button onClick={() => (modelId ? reconstruct.mutate({ modelId }) : fail("Register and select a model first."))} disabled={busy} className="rounded-xl bg-[#16211f] hover:bg-[#263a35]">{reconstruct.isPending ? "Reconstructing…" : "Run reconstruction"}</Button>
         <p className="text-xs text-muted-foreground">Reads this lane&rsquo;s corpus — imported archives <span className="font-medium">plus</span> conversations from this app — calls that model through its provider adapter, and publishes a new versioned snapshot, retiring <span className="font-medium">current</span> on the previous one.</p>
         <p className="text-xs text-muted-foreground">Corpus now: <span className="font-medium text-[#16211f]">{corpusCount}</span> conversation{corpusCount === 1 ? "" : "s"} available to reconstruct from.</p>
+        <p className="text-xs text-muted-foreground">{autoAfter > 0 ? `Auto-reconstruction is on: this lane rebuilds itself after ${autoAfter} new messages, in the background.` : "Auto-reconstruction is off — state changes only when you run it."}</p>
       </div>
       {(message || error) && <div className="md:col-span-2">{error ? <p className="text-sm text-red-600">{error}</p> : <p className="text-sm text-[#477458]">{message}</p>}</div>}
     </CardContent>

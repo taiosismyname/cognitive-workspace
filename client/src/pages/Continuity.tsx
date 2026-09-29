@@ -80,7 +80,7 @@ function ContinuityContent() {
       <Metric icon={History} label="State versions" value={snapshots.length} detail="Never silently overwritten" />
     </section>
 
-    <div className="mt-6"><ImportAndReconstruct models={models} /></div>
+    <div className="mt-6"><ImportAndReconstruct models={models} corpusCount={conversations.length} /></div>
 
     <div className="mt-6 grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
       <Card className="border-0 bg-[#16211f] text-white shadow-[0_20px_60px_rgba(21,39,33,0.14)]"><CardContent className="p-8 md:p-10"><Badge className="border-0 bg-[#d8f0df]/15 text-[#d8f0df]">Reconstructable context</Badge><h2 className="mt-6 text-2xl font-semibold tracking-[-0.03em]">What can be supplied to a model right now?</h2><p className="mt-4 max-w-2xl text-sm leading-7 text-white/65">Only state that is already published or marked current can be treated as continuity context. The panel below is intentionally honest: if no published snapshot exists, the UI does not invent one.</p><div className="mt-7 rounded-2xl border border-white/10 bg-white/5 p-5"><div className="flex items-center justify-between gap-4"><span className="text-xs uppercase tracking-[0.18em] text-white/45">Current lane</span>{current ? <StatusPill status={current.status} good={current.status === "published"} /> : <StatusPill status="No published state" />}</div><p className="mt-3 text-lg font-medium">{currentModel?.displayName ?? "No model state selected"}</p><p className="mt-1 text-xs text-white/50">{currentModel ? `${currentModel.providerKey} · ${currentModel.modelKey}` : "A reconstruction snapshot is required before continuity can be supplied."}</p>{summary && <div className="mt-5 space-y-2 text-sm text-white/75">{Object.entries(summary).slice(0, 5).map(([key, value]) => <div key={key} className="flex gap-3 border-t border-white/10 pt-2"><span className="min-w-28 text-white/40">{key}</span><span className="line-clamp-3">{typeof value === "string" ? value : JSON.stringify(value)}</span></div>)}</div>}{!summary && <p className="mt-5 text-sm text-white/55">No state summary is stored in the current snapshot. Imported sources and derived memories remain inspectable below, but no reconstructed context is claimed.</p>}{reconstructableEvidence && <details className="mt-5 rounded-xl border border-white/10 bg-black/10 p-4"><summary className="cursor-pointer text-xs font-semibold uppercase tracking-[0.16em] text-white/60">Exact persisted evidence payload</summary><pre className="mt-4 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] leading-5 text-white/70">{JSON.stringify(reconstructableEvidence, null, 2)}</pre></details>}</div></CardContent></Card>
@@ -105,11 +105,15 @@ function ContinuityContent() {
 // the normalized corpus, then ask a model to reconstruct its own lane from it.
 // Both call the same procedures the backend already exposes; nothing here
 // invents state — a snapshot only appears if the model actually returned one.
-function ImportAndReconstruct({ models }: { models: Array<{ id: number; displayName: string }> }) {
+const PASTED_HINT = "Start each turn with a role label and a colon — “User:” or “Assistant:” (also Human / AI / Claude / ChatGPT / Gemini / System). Content continues until the next label.";
+
+function ImportAndReconstruct({ models, corpusCount }: { models: Array<{ id: number; displayName: string }>; corpusCount: number }) {
   const utils = trpc.useUtils();
-  const [format, setFormat] = useState<"entries_query" | "claude">("entries_query");
+  const [format, setFormat] = useState<"entries_query" | "claude" | "pasted_transcript">("entries_query");
   const [fileName, setFileName] = useState("");
   const [raw, setRaw] = useState<unknown>(null);
+  const [pastedText, setPastedText] = useState("");
+  const [pastedTitle, setPastedTitle] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [modelId, setModelId] = useState<number | undefined>(undefined);
@@ -129,12 +133,16 @@ function ImportAndReconstruct({ models }: { models: Array<{ id: number; displayN
     onSuccess: data => succeed(`Imported ${data.conversationsImported} conversations and ${data.messagesImported} messages from an entries/query export (${data.duplicatesSkipped} duplicate turns skipped).`),
     onError: err => fail(err.message),
   });
+  const importPasted = trpc.continuity.importPastedTranscript.useMutation({
+    onSuccess: data => succeed(`Imported a pasted transcript: ${data.conversationsImported} conversation, ${data.messagesImported} messages (${data.duplicatesSkipped} duplicate turns skipped).`),
+    onError: err => fail(err.message),
+  });
   const reconstruct = trpc.continuity.reconstruct.useMutation({
     onSuccess: data => succeed(`Published snapshot v${data.version} — ${data.artifactCount} artifacts, ${data.citationCount} source citations, from ${data.sourceFormatKeys.join(", ") || "imported corpus"}.`),
     onError: err => fail(err.message),
   });
 
-  const busy = importClaude.isPending || importEntries.isPending || reconstruct.isPending;
+  const busy = importClaude.isPending || importEntries.isPending || importPasted.isPending || reconstruct.isPending;
 
   const onFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -148,6 +156,11 @@ function ImportAndReconstruct({ models }: { models: Array<{ id: number; displayN
   };
 
   const runImport = () => {
+    if (format === "pasted_transcript") {
+      if (!pastedText.trim()) { fail("Paste a transcript first."); return; }
+      importPasted.mutate({ text: pastedText, title: pastedTitle.trim() || undefined });
+      return;
+    }
     if (raw === null) { fail("Choose a JSON export first."); return; }
     const sourceFileName = fileName || (format === "claude" ? "claude-export.json" : "entries-query-export.json");
     if (format === "claude") importClaude.mutate({ raw, sourceFileName });
@@ -160,14 +173,21 @@ function ImportAndReconstruct({ models }: { models: Array<{ id: number; displayN
       <div className="space-y-3">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#789381]">1 · Import provider history</p>
         <label className="flex items-center gap-2 text-xs"><span className="font-medium text-muted-foreground">Format</span>
-          <select value={format} onChange={event => setFormat(event.target.value as "entries_query" | "claude")} className="rounded-lg border border-black/10 bg-white px-2 py-1">
+          <select value={format} onChange={event => setFormat(event.target.value as "entries_query" | "claude" | "pasted_transcript")} className="rounded-lg border border-black/10 bg-white px-2 py-1">
             <option value="entries_query">entries / query</option>
             <option value="claude">Claude.ai export</option>
+            <option value="pasted_transcript">pasted transcript</option>
           </select>
         </label>
-        <input type="file" accept="application/json,.json" onChange={onFile} className="block w-full text-xs" />
-        <p className="text-xs text-muted-foreground">{fileName ? `Selected: ${fileName}` : "Choose a .json export. Existing conversations are de-duplicated by native id."}</p>
-        <Button onClick={runImport} disabled={busy || raw === null} className="rounded-xl bg-[#16211f] hover:bg-[#263a35]">{importClaude.isPending || importEntries.isPending ? "Importing…" : "Import export"}</Button>
+        {format === "pasted_transcript" ? <div className="space-y-2">
+          <input value={pastedTitle} onChange={event => setPastedTitle(event.target.value)} placeholder="Title (optional)" className="w-full rounded-lg border border-black/10 bg-white px-2 py-1 text-xs" />
+          <textarea value={pastedText} onChange={event => setPastedText(event.target.value)} rows={7} placeholder={"User: ...\nAssistant: ..."} className="w-full rounded-lg border border-black/10 bg-white p-3 font-mono text-xs" />
+          <p className="text-xs text-muted-foreground">{PASTED_HINT}</p>
+        </div> : <>
+          <input type="file" accept="application/json,.json" onChange={onFile} className="block w-full text-xs" />
+          <p className="text-xs text-muted-foreground">{fileName ? `Selected: ${fileName}` : "Choose a .json export. Existing conversations are de-duplicated by native id."}</p>
+        </>}
+        <Button onClick={runImport} disabled={busy || (format === "pasted_transcript" ? pastedText.trim().length === 0 : raw === null)} className="rounded-xl bg-[#16211f] hover:bg-[#263a35]">{importClaude.isPending || importEntries.isPending || importPasted.isPending ? "Importing…" : "Import"}</Button>
       </div>
       <div className="space-y-3">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#789381]">2 · Reconstruct this lane</p>
@@ -176,7 +196,8 @@ function ImportAndReconstruct({ models }: { models: Array<{ id: number; displayN
           {models.map(model => <option key={model.id} value={model.id}>{model.displayName}</option>)}
         </select>
         <Button onClick={() => (modelId ? reconstruct.mutate({ modelId }) : fail("Register and select a model first."))} disabled={busy} className="rounded-xl bg-[#16211f] hover:bg-[#263a35]">{reconstruct.isPending ? "Reconstructing…" : "Run reconstruction"}</Button>
-        <p className="text-xs text-muted-foreground">Reads the imported corpus for the selected lane, calls that model through its provider adapter, and publishes a new versioned snapshot — retiring <span className="font-medium">current</span> on the previous one.</p>
+        <p className="text-xs text-muted-foreground">Reads this lane&rsquo;s corpus — imported archives <span className="font-medium">plus</span> conversations from this app — calls that model through its provider adapter, and publishes a new versioned snapshot, retiring <span className="font-medium">current</span> on the previous one.</p>
+        <p className="text-xs text-muted-foreground">Corpus now: <span className="font-medium text-[#16211f]">{corpusCount}</span> conversation{corpusCount === 1 ? "" : "s"} available to reconstruct from.</p>
       </div>
       {(message || error) && <div className="md:col-span-2">{error ? <p className="text-sm text-red-600">{error}</p> : <p className="text-sm text-[#477458]">{message}</p>}</div>}
     </CardContent>

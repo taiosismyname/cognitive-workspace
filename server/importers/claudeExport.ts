@@ -50,7 +50,7 @@ export interface ClaudeExportConversation {
 export interface ParsedMessage {
   nativeMessageId: string;
   nativeParentId: string | null;
-  role: "user" | "assistant" | "tool";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
   nativeCreatedAt: string;
   rawPayloadJson: string;

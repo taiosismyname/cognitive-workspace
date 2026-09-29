@@ -7,6 +7,7 @@ import { cosineSimilarity, getAdapter, ProviderUnavailableError } from "./adapte
 import { getDb, getCouncilResults, listConversations, listMemories, listMessages, listModels, listCouncilRuns, listProviderConnections, listHistoryImports, listStateSnapshots, listStateArtifacts, listArtifactSources, listImportedConversations, ensureWorkspaceOrigin, ownsConversation, ownsModel } from "./db";
 import { parseClaudeExport } from "./importers/claudeExport";
 import { ENTRIES_QUERY_DISPLAY_LABEL, ENTRIES_QUERY_SOURCE_FORMAT, parseEntriesQueryExport } from "./importers/entriesQueryExport";
+import { PASTED_TRANSCRIPT_DISPLAY_LABEL, PASTED_TRANSCRIPT_SOURCE_FORMAT, parsePastedTranscript } from "./importers/pastedTranscript";
 import { persistParsedImport } from "./importers/persistImport";
 import { runReconstruction } from "./reconstruction";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -195,6 +196,17 @@ export const appRouter = router({
         const { conversations: parsed, stats } = parseEntriesQueryExport(input.raw);
         const result = await persistParsedImport({ userId: ctx.user.id, providerKey: ENTRIES_QUERY_SOURCE_FORMAT, displayLabel: ENTRIES_QUERY_DISPLAY_LABEL, sourceFileName: input.sourceFileName, conversationsSeen: stats.conversationsSeen, parsed });
         return { ...result, sourceFormat: ENTRIES_QUERY_SOURCE_FORMAT, parseStats: stats };
+      }),
+    // Third labelled source, for providers with no export at all: the user
+    // pastes a transcript and it becomes first-class corpus. The native
+    // conversation id is a hash of the pasted text, so re-pasting the same
+    // transcript de-duplicates instead of duplicating.
+    importPastedTranscript: protectedProcedure
+      .input(z.object({ text: z.string().min(1), title: z.string().max(255).optional(), createdAt: z.string().optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const { conversations: parsed, stats } = parsePastedTranscript(input);
+        const result = await persistParsedImport({ userId: ctx.user.id, providerKey: PASTED_TRANSCRIPT_SOURCE_FORMAT, displayLabel: PASTED_TRANSCRIPT_DISPLAY_LABEL, sourceFileName: input.title ? `${input.title}.txt` : "pasted-transcript.txt", conversationsSeen: stats.conversationsSeen, parsed });
+        return { ...result, sourceFormat: PASTED_TRANSCRIPT_SOURCE_FORMAT, parseStats: stats };
       }),
     // The reconstruction call: load the lane's imported corpus, ask the lane's
     // model to reconstruct its own continuity state, and publish a new versioned

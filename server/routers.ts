@@ -9,7 +9,7 @@ import { parseClaudeExport } from "./importers/claudeExport";
 import { ENTRIES_QUERY_DISPLAY_LABEL, ENTRIES_QUERY_SOURCE_FORMAT, parseEntriesQueryExport } from "./importers/entriesQueryExport";
 import { PASTED_TRANSCRIPT_DISPLAY_LABEL, PASTED_TRANSCRIPT_SOURCE_FORMAT, parsePastedTranscript } from "./importers/pastedTranscript";
 import { persistParsedImport } from "./importers/persistImport";
-import { runReconstruction } from "./reconstruction";
+import { autoReconstructThreshold, maybeAutoReconstruct, runReconstruction } from "./reconstruction";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { ENV } from "./_core/env";
 import { systemRouter } from "./_core/systemRouter";
@@ -32,7 +32,7 @@ export const appRouter = router({
   workspace: router({
     overview: protectedProcedure.query(async ({ ctx }) => {
       const [models, conversationsList, memoriesList, runs] = await Promise.all([listModels(ctx.user.id), listConversations(ctx.user.id), listMemories(ctx.user.id), listCouncilRuns(ctx.user.id)]);
-      return { models, conversations: conversationsList, memories: memoriesList, councilRuns: runs, integration: { openrouter: Boolean(ENV.openRouterApiKey), embeddingModel: ENV.openRouterEmbeddingModel } };
+      return { models, conversations: conversationsList, memories: memoriesList, councilRuns: runs, integration: { openrouter: Boolean(ENV.openRouterApiKey), embeddingModel: ENV.openRouterEmbeddingModel, autoReconstructMessages: autoReconstructThreshold() } };
     }),
     models: protectedProcedure.query(({ ctx }) => listModels(ctx.user.id)),
     registerModel: protectedProcedure.input(modelInput).mutation(async ({ ctx, input }) => {
@@ -68,6 +68,10 @@ export const appRouter = router({
       try {
         const response = await getAdapter(model.providerKey).complete({ modelKey: model.modelKey, messages: adapterMessages });
         const inserted = await db.insert(conversationMessages).values({ conversationId: input.conversationId, role: "assistant", content: response.text, modelRegistryId: model.id, providerRequestId: response.requestId });
+        // Auto-reconstruction: fire-and-forget, so a background model call can
+        // never slow down or fail the chat reply. It only runs when this lane has
+        // accumulated enough new messages since its last published state.
+        void maybeAutoReconstruct(ctx.user.id, model);
         return { messageId: Number(inserted[0].insertId), content: response.text, providerRequestId: response.requestId };
       } catch (error) {
         const message = error instanceof Error ? error.message : "Provider call failed.";

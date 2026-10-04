@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planSnapshot } from "./reconstruction";
+import { autoReconstructThreshold, cronAuthorized, planSnapshot, shouldAutoReconstruct } from "./reconstruction";
 import type { NormalizedStateArtifact } from "./continuity";
 
 function artifact(citations: NormalizedStateArtifact["citations"]): NormalizedStateArtifact {
@@ -36,5 +36,60 @@ describe("planSnapshot", () => {
     const artifacts = [artifact([{ conversationId: 7, messageId: 8, sourceRole: "contradiction", quote: "no" }])];
     const plan = planSnapshot({ prior: null, artifacts, validConversationIds: new Set([7]) });
     expect(plan.sources[0]).toMatchObject({ conversationId: 7, messageId: 8, sourceRole: "contradiction", quote: "no" });
+  });
+});
+
+describe("shouldAutoReconstruct", () => {
+  it("never triggers when disabled (threshold 0)", () => {
+    expect(shouldAutoReconstruct({ lastMessageCount: 0, currentMessageCount: 100, threshold: 0 })).toBe(false);
+  });
+
+  it("treats no prior run as a zero baseline", () => {
+    expect(shouldAutoReconstruct({ lastMessageCount: null, currentMessageCount: 7, threshold: 8 })).toBe(false);
+    expect(shouldAutoReconstruct({ lastMessageCount: null, currentMessageCount: 8, threshold: 8 })).toBe(true);
+  });
+
+  it("measures the delta against the last published run, not the total", () => {
+    expect(shouldAutoReconstruct({ lastMessageCount: 40, currentMessageCount: 47, threshold: 8 })).toBe(false);
+    expect(shouldAutoReconstruct({ lastMessageCount: 40, currentMessageCount: 48, threshold: 8 })).toBe(true);
+  });
+});
+
+describe("autoReconstructThreshold", () => {
+  it("defaults when unset or unparseable", () => {
+    expect(autoReconstructThreshold(undefined)).toBe(8);
+    expect(autoReconstructThreshold("")).toBe(8);
+    expect(autoReconstructThreshold("not-a-number")).toBe(8);
+  });
+
+  it("honours an explicit value, including disable", () => {
+    expect(autoReconstructThreshold("3")).toBe(3);
+    expect(autoReconstructThreshold("0")).toBe(0);
+  });
+
+  it("rejects negatives and floors fractions", () => {
+    expect(autoReconstructThreshold("-5")).toBe(8);
+    expect(autoReconstructThreshold("4.9")).toBe(4);
+  });
+});
+
+describe("cronAuthorized", () => {
+  it("leaves the endpoint inert when no secret is configured", () => {
+    expect(cronAuthorized("Bearer anything", undefined)).toBe(false);
+    expect(cronAuthorized("Bearer anything", "")).toBe(false);
+    expect(cronAuthorized("Bearer anything", "   ")).toBe(false);
+  });
+
+  it("rejects a missing or wrong token", () => {
+    expect(cronAuthorized(undefined, "s3cret")).toBe(false);
+    expect(cronAuthorized("", "s3cret")).toBe(false);
+    expect(cronAuthorized("Bearer wrong", "s3cret")).toBe(false);
+    expect(cronAuthorized("s3cret", "s3cret")).toBe(false);
+  });
+
+  it("accepts the exact bearer token", () => {
+    expect(cronAuthorized("Bearer s3cret", "s3cret")).toBe(true);
+    expect(cronAuthorized("bearer s3cret", "s3cret")).toBe(true);
+    expect(cronAuthorized("Bearer s3cret", "s3cret\n")).toBe(true);
   });
 });

@@ -5,7 +5,7 @@ import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerLocalAuthRoutes } from "./localAuth";
 import { registerStorageProxy } from "./storageProxy";
-import { scheduledReconstruction } from "../reconstruction";
+import { cronAuthorized, scheduledReconstruction } from "../reconstruction";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
@@ -35,9 +35,7 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 // is not configured, so the endpoint is inert by default.
 function registerCronRoutes(app: express.Express) {
   app.post("/api/cron/reconstruct", async (req, res) => {
-    const secret = process.env.CRON_SECRET ?? "";
-    const provided = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-    if (!secret || provided !== secret) {
+    if (!cronAuthorized(req.headers.authorization, process.env.CRON_SECRET)) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }

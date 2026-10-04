@@ -102,6 +102,18 @@ export function autoReconstructThreshold(env: string | undefined = process.env.A
   return Math.floor(parsed);
 }
 
+// Pure auth check for the scheduled endpoint, extracted from the route handler
+// so the security guard is itself unit-testable. An unset secret leaves the
+// endpoint inert rather than open.
+export function cronAuthorized(headerValue: unknown, secret: string | undefined): boolean {
+  const expected = (secret ?? "").trim();
+  if (expected === "") return false;
+  // Require the documented `Bearer <token>` scheme rather than accepting a bare
+  // token in the Authorization header.
+  const match = /^Bearer\s+(.+)$/i.exec(String(headerValue ?? "").trim());
+  return match !== null && match[1].trim() === expected;
+}
+
 // Pure threshold decision — testable without a database.
 export function shouldAutoReconstruct(input: { lastMessageCount: number | null; currentMessageCount: number; threshold: number }): boolean {
   if (input.threshold <= 0) return false;

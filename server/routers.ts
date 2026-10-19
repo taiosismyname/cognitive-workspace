@@ -8,6 +8,7 @@ import { getDb, getCouncilResults, listConversations, listMemories, listMessages
 import { parseClaudeExport } from "./importers/claudeExport";
 import { ENTRIES_QUERY_DISPLAY_LABEL, ENTRIES_QUERY_SOURCE_FORMAT, parseEntriesQueryExport } from "./importers/entriesQueryExport";
 import { PASTED_TRANSCRIPT_DISPLAY_LABEL, PASTED_TRANSCRIPT_SOURCE_FORMAT, parsePastedTranscript } from "./importers/pastedTranscript";
+import { KIMI_ARCHIVE_DISPLAY_LABEL, KIMI_ARCHIVE_SOURCE_FORMAT, parseKimiArchive } from "./importers/kimiArchive";
 import { persistParsedImport } from "./importers/persistImport";
 import { autoReconstructThreshold, maybeAutoReconstruct, runReconstruction } from "./reconstruction";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -211,6 +212,17 @@ export const appRouter = router({
         const { conversations: parsed, stats } = parsePastedTranscript(input);
         const result = await persistParsedImport({ userId: ctx.user.id, providerKey: PASTED_TRANSCRIPT_SOURCE_FORMAT, displayLabel: PASTED_TRANSCRIPT_DISPLAY_LABEL, sourceFileName: input.title ? `${input.title}.txt` : "pasted-transcript.txt", conversationsSeen: stats.conversationsSeen, parsed });
         return { ...result, sourceFormat: PASTED_TRANSCRIPT_SOURCE_FORMAT, parseStats: stats };
+      }),
+    // Fourth labelled source: a Kimi archive browser HTML export. Threads dedupe
+    // by native chat id, falling back to a hash of the source .md filename, so
+    // re-importing a refreshed archive adds new threads rather than duplicating
+    // the ones already held.
+    importKimiArchive: protectedProcedure
+      .input(z.object({ html: z.string().min(1), sourceFileName: z.string().max(255).optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const { conversations: parsed, stats } = parseKimiArchive(input);
+        const result = await persistParsedImport({ userId: ctx.user.id, providerKey: KIMI_ARCHIVE_SOURCE_FORMAT, displayLabel: KIMI_ARCHIVE_DISPLAY_LABEL, sourceFileName: input.sourceFileName ?? "kimi-archive.html", conversationsSeen: stats.conversationsSeen, parsed });
+        return { ...result, sourceFormat: KIMI_ARCHIVE_SOURCE_FORMAT, parseStats: stats };
       }),
     // The reconstruction call: load the lane's imported corpus, ask the lane's
     // model to reconstruct its own continuity state, and publish a new versioned

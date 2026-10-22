@@ -29,7 +29,19 @@ export type ReconstructionModel = {
   modelKey: string;
   displayName: string;
   adapterStatus: string;
+  // Which history sources this lane owns (comma-separated provider keys).
+  // null/undefined means "every source the user has imported".
+  corpusProviderKeys?: string | null;
 };
+
+// Turns the stored comma-separated scope into the list the corpus loader wants.
+// Blank entries are dropped so a trailing comma cannot silently widen the scope.
+export function parseProviderKeys(value: string | null | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map(key => key.trim())
+    .filter(key => key.length > 0);
+}
 
 export type ReconstructionResult = {
   runId: number;
@@ -150,13 +162,14 @@ export async function maybeAutoReconstruct(userId: number, model: Reconstruction
   autoRunsInFlight.add(key);
 
   try {
-    const currentMessageCount = await db.countCorpusMessages(userId);
+    const laneScope = parseProviderKeys(model.corpusProviderKeys);
+    const currentMessageCount = await db.countCorpusMessages(userId, laneScope);
     const lastRun = await db.getLatestReconstructionRun(userId, model.id);
     const lastMessageCount = recordedMessageCount(lastRun?.sourceSelectionJson ?? null);
     if (!shouldAutoReconstruct({ lastMessageCount, currentMessageCount, threshold })) {
       return { triggered: false, reason: `${currentMessageCount - (lastMessageCount ?? 0)} new messages, below threshold ${threshold}` };
     }
-    const result = await runReconstruction({ userId, model });
+    const result = await runReconstruction({ userId, model, providerKeys: laneScope });
     return { triggered: true, reason: "message threshold reached", version: result.version };
   } catch (error) {
     console.warn("[auto-reconstruct] failed:", error instanceof Error ? error.message : error);
@@ -176,11 +189,12 @@ export async function scheduledReconstruction(limit = 5): Promise<{ considered: 
   for (const model of lanes) {
     if (reconstructed.length >= limit) break;
     try {
-      const currentMessageCount = await db.countCorpusMessages(model.userId);
+      const laneScope = parseProviderKeys(model.corpusProviderKeys);
+      const currentMessageCount = await db.countCorpusMessages(model.userId, laneScope);
       const lastRun = await db.getLatestReconstructionRun(model.userId, model.id);
       const lastMessageCount = recordedMessageCount(lastRun?.sourceSelectionJson ?? null);
       if (!shouldAutoReconstruct({ lastMessageCount, currentMessageCount, threshold })) { skipped += 1; continue; }
-      const result = await runReconstruction({ userId: model.userId, model });
+      const result = await runReconstruction({ userId: model.userId, model, providerKeys: laneScope });
       reconstructed.push({ userId: model.userId, modelId: model.id, version: result.version });
     } catch (error) {
       console.warn("[scheduled-reconstruct] skipped a lane:", error instanceof Error ? error.message : error);
@@ -194,6 +208,9 @@ export async function runReconstruction(input: {
   userId: number;
   model: ReconstructionModel;
   historyImportId?: number | null;
+  // Restricts the corpus to specific history sources (lane scoping). Absent or
+  // empty falls back to the lane's own declared scope, then to every source.
+  providerKeys?: string[] | null;
   // Injectable for tests; defaults to the real provider adapter.
   complete?: (args: { modelKey: string; messages: ChatTurn[] }) => Promise<ProviderResponse>;
 }): Promise<ReconstructionResult> {
@@ -202,7 +219,7 @@ export async function runReconstruction(input: {
   }
 
   const historyImportId = input.historyImportId ?? null;
-  const corpus = await db.loadCorpusForReconstruction(input.userId, historyImportId);
+  const corpus = await db.loadCorpusForReconstruction(input.userId, historyImportId, input.providerKeys ?? parseProviderKeys(input.model.corpusProviderKeys));
   if (corpus.length === 0) {
     throw new Error("No imported corpus is available for reconstruction. Import a provider export first.");
   }

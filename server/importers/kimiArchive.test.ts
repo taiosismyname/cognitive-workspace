@@ -68,7 +68,8 @@ describe("parseKimiArchive", () => {
     const { conversations, stats } = parseKimiArchive({ html });
     expect(conversations[0].messages.map(m => m.role)).toEqual(["user", "assistant", "user"]);
     expect(conversations[0].messages[1].content).toBe("hi there");
-    expect(stats.blockTypeCounts.h3_numbered).toBe(3);
+    expect(stats.blockTypeCounts.h3_message).toBe(2);
+    expect(stats.blockTypeCounts.h3_reply).toBe(1);
   });
 
   it("parses the inline <p><strong>Tai:</strong> format", () => {
@@ -93,7 +94,7 @@ describe("parseKimiArchive", () => {
     const { conversations, stats } = parseKimiArchive({ html });
     expect(conversations).toHaveLength(3);
     expect(stats.messagesSeen).toBe(6);
-    expect(stats.blockTypeCounts).toEqual({ h3_name: 2, h3_numbered: 2, inline_bold: 2 });
+    expect(stats.blockTypeCounts).toEqual({ h3_name: 2, h3_message: 1, h3_reply: 1, inline_bold: 2 });
   });
 
   it("extracts provenance: chat id, url, source md file and capture quality", () => {
@@ -189,5 +190,49 @@ describe("parseKimiArchive", () => {
 
   it("throws a clear error when the file is not an archive", () => {
     expect(() => parseKimiArchive({ html: "<html><body>nothing here</body></html>" })).toThrow(/No archive threads found/);
+  });
+});
+
+// Regression: formats found in the real archive AFTER the first version of this
+// parser shipped. Each one silently dropped every turn in the thread.
+describe("parseKimiArchive — turn formats found late", () => {
+  it("parses the 'M1 — Tai' / 'M2 — Kimi' format (165 turns in two real threads)", () => {
+    const html = wrap(thread({
+      title: "Cloud Storage: Real or Myth?", date: "2026-01-01",
+      body: `${FRONT_MATTER}<h2>Transcript</h2><h3>M1 — Tai</h3><p>first</p><h3>M2 — Kimi</h3><p>second</p><h3>M3 — Tai</h3><p>third</p>`,
+    }));
+    const { conversations } = parseKimiArchive({ html });
+    expect(conversations[0].messages.map(m => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(conversations[0].messages.map(m => m.content)).toEqual(["first", "second", "third"]);
+  });
+
+  it("parses annotated speakers without inventing a new role", () => {
+    const html = wrap(thread({
+      title: "Annotated", date: "2026-01-02",
+      body: `<h3>Tai</h3><p>a</p><h3>Kimi (continued agent work)</h3><p>b</p><h3>Message 12 — Kimi (agent, fetched)</h3><p>c</p><h3>Kimi — 3:42 AM</h3><p>d</p>`,
+    }));
+    const { conversations } = parseKimiArchive({ html });
+    expect(conversations[0].messages.map(m => m.role)).toEqual(["user", "assistant", "assistant", "assistant"]);
+  });
+
+  it("accepts a bracketed speaker label", () => {
+    const html = wrap(thread({
+      title: "Bracketed", date: "2026-01-03",
+      body: `<h3>M9 — [Tai — pasted from another chat]</h3><p>pasted</p><h3>M10 — Kimi</h3><p>reply</p>`,
+    }));
+    const { conversations } = parseKimiArchive({ html });
+    expect(conversations[0].messages[0].role).toBe("user");
+    expect(conversations[0].messages[0].content).toBe("pasted");
+  });
+
+  it("stops the transcript at an annotated margin-notes heading", () => {
+    const html = wrap(thread({
+      title: "Annotated margins", date: "2026-01-04",
+      body: `<h3>Tai</h3><p>question</p><h3>Kimi</h3><p>answer</p><h2>Margin notes (the story outside the topic)</h2><p>NOT transcript</p>`,
+    }));
+    const conv = parseKimiArchive({ html }).conversations[0];
+    expect(conv.messages).toHaveLength(2);
+    expect(conv.messages[1].content).toBe("answer");
+    expect(conv.messages[1].content).not.toContain("NOT transcript");
   });
 });

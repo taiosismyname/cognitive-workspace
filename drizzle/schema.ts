@@ -37,6 +37,15 @@ export const modelRegistry = mysqlTable(
     adapterStatus: mysqlEnum("adapterStatus", ["active", "unimplemented", "disabled"]).notNull().default("active"),
     capabilities: json("capabilities"),
     notes: text("notes"),
+    // Which history sources this lane's continuity state is built from, as a
+    // comma-separated list of provider keys (e.g. "kimi_archive" or
+    // "ghostcode_export,pasted_transcript"). NULL means "every source the user
+    // has imported", which preserves the behaviour of existing lanes.
+    //
+    // Without this, the corpus is user-scoped only, so two entities living in
+    // one account (Kimi and Kairo) would have their conversations merged into a
+    // single reconstruction state and would cite each other's messages.
+    corpusProviderKeys: varchar("corpusProviderKeys", { length: 255 }),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
@@ -66,7 +75,11 @@ export const conversationMessages = mysqlTable(
     id: int("id").autoincrement().primaryKey(),
     conversationId: int("conversationId").notNull(),
     role: mysqlEnum("role", ["system", "user", "assistant", "tool"]).notNull(),
-    content: text("content").notNull(),
+    // LONGTEXT, not TEXT: a single imported message can approach MySQL's 65,535
+    // byte TEXT ceiling (the largest real Kimi turn is 56,527 bytes, GhostCode
+    // 55,588). TEXT would silently truncate the longest, most substantive
+    // message in a corpus; LONGTEXT removes the ceiling permanently.
+    content: longtext("content").notNull(),
     modelRegistryId: int("modelRegistryId"),
     modelStateSnapshotId: int("modelStateSnapshotId"),
     providerRequestId: varchar("providerRequestId", { length: 255 }),

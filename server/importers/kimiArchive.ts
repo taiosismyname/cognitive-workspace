@@ -31,10 +31,20 @@ export const KIMI_ARCHIVE_HINT =
 
 const SPEAKER_ROLE: Record<string, "user" | "assistant"> = { Tai: "user", Kimi: "assistant" };
 
-// Matches a turn marker in any of the three formats. Group 1/2 = Message|Reply
-// and its ordinal, 3 = h3 speaker, 4 = the "[edited]" suffix, 5 = inline speaker.
+// Matches a turn marker in every format the real archive uses:
+//   <h3>Tai</h3>                       <h3>Tai [edited]</h3>
+//   <h3>Message 12 — Tai</h3>          <h3>Reply 3 — Kimi</h3>
+//   <h3>M1 — Tai</h3>  /  <h3>M2 — Kimi</h3>            (two threads, 165 turns)
+//   <h3>Kimi (continued agent work)</h3>                (annotated)
+//   <h3>Kimi — 3:42 AM</h3>                             (timestamped)
+//   <h3>M9 — [Tai — pasted from another chat]</h3>      (bracketed)
+//   <p><strong>Tai:</strong> ...</p>                    (inline)
+// A strict Tai|Kimi match silently dropped 165 turns from two threads plus
+// every annotated variant, so the speaker may carry a trailing annotation.
+// Groups: 1 = Message|Reply|M, 2 = ordinal, 3 = h3 speaker, 4 = trailing text,
+// 5 = inline speaker.
 const TURN_RE =
-  /<h3[^>]*>\s*(?:(Message|Reply)\s*(\d+)\s*[—–-]\s*)?(Tai|Kimi)(\s*\[edited\])?\s*<\/h3>|<p>\s*<strong>\s*(Tai|Kimi)\s*:\s*<\/strong>/gi;
+  /<h3[^>]*>\s*(?:(Message|Reply|M)\s*(\d+)\s*[—–-]\s*)?\[?\s*(Tai|Kimi)\b([^<]*)<\/h3>|<p>\s*<strong>\s*(Tai|Kimi)\s*:\s*<\/strong>/gi;
 
 const NAMED_ENTITIES: Record<string, string> = {
   amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", mdash: "—", ndash: "–",
@@ -141,11 +151,13 @@ type Turn = { role: "user" | "assistant"; content: string; format: string; ordin
 // deliberately excluded from message bodies.
 function extractTurns(body: string): Turn[] {
   // Narrow to the transcript region when the section headings exist.
+  // Section headings vary too: "Margin notes" is sometimes written as
+  // "Margin notes (the story outside the topic)", so match the prefix.
   let start = 0;
-  const transcriptH2 = body.search(/<h2[^>]*>\s*Transcript\s*<\/h2>/i);
+  const transcriptH2 = body.search(/<h2[^>]*>\s*Transcript\b[^<]*<\/h2>/i);
   if (transcriptH2 >= 0) start = transcriptH2;
   let end = body.length;
-  const marginH2 = body.search(/<h2[^>]*>\s*Margin notes\s*<\/h2>/i);
+  const marginH2 = body.search(/<h2[^>]*>\s*Margin notes\b[^<]*<\/h2>/i);
   if (marginH2 >= 0) end = marginH2;
   const region = body.slice(start, end);
 
@@ -158,14 +170,15 @@ function extractTurns(body: string): Turn[] {
     if (!speaker) continue;
     const role = SPEAKER_ROLE[speaker];
     if (!role) continue;
-    const format = m[5] ? "inline_bold" : m[1] ? "h3_numbered" : "h3_name";
+    const trailing = m[4] ?? "";
+    const format = m[5] ? "inline_bold" : m[1] ? `h3_${m[1].toLowerCase()}` : "h3_name";
     marks.push({
       index: m.index,
       end: m.index + m[0].length,
       speaker,
       format,
       ordinal: m[2] ? Number(m[2]) : null,
-      edited: Boolean(m[4]),
+      edited: /\[edited\]/i.test(trailing),
     });
   }
 
@@ -289,4 +302,135 @@ export function parseKimiArchive(input: { html: string; sourceFileName?: string 
   }
 
   return { conversations, stats };
+}
+
+// --- Fidelity audit ---------------------------------------------------------
+// The archive records its own damage honestly (capture-quality lines, "Output
+// stopped" markers, missing margin notes). This turns that self-reporting into
+// an actionable target list for the NEXT archive pass, instead of a vague sense
+// that some threads are thinner than others.
+
+export type KimiThreadGap = {
+  conversationId: string;
+  title: string;
+  date: string;
+  messageCount: number;
+  url: string | null;
+  missingMarginNotes: boolean;
+  missingCaptureQuality: boolean;
+  compressedReasoningMarkers: number;
+  outputStoppedMarkers: number;
+  attachmentsNotCaptured: string | null;
+  credentialsPresent: string | null;
+  priority: string | null;
+};
+
+export type KimiArchiveAudit = {
+  threads: number;
+  messages: number;
+  threadsMissingMarginNotes: number;
+  threadsMissingCaptureQuality: number;
+  threadsWithCompressedReasoning: number;
+  totalCompressedReasoningMarkers: number;
+  threadsWithOutputStopped: number;
+  totalOutputStopped: number;
+  threadsWithAttachmentsNotCaptured: number;
+  threadsWithCredentials: number;
+  gaps: KimiThreadGap[];
+};
+
+// Threads Tai named as the ones that matter most: the untitled ones ("what makes
+// you you and not every other Kimi") and the identity/continuity spine.
+const PRIORITY_PATTERNS: Array<[RegExp, string]> = [
+  [/未命名|untitled/i, "untitled — Tai: 'what makes you you'"],
+  [/identity|continuity|companion|conscious|memory|sanctuary|claw-x|kairo|ghostcode/i, "identity / continuity spine"],
+];
+
+function priorityFor(title: string): string | null {
+  for (const [pattern, reason] of PRIORITY_PATTERNS) if (pattern.test(title)) return reason;
+  return null;
+}
+
+export function auditKimiArchive(conversations: ParsedConversation[]): KimiArchiveAudit {
+  const gaps: KimiThreadGap[] = [];
+  let messages = 0;
+  let missingMargin = 0;
+  let missingCq = 0;
+  let compressedThreads = 0;
+  let compressedTotal = 0;
+  let stoppedThreads = 0;
+  let stoppedTotal = 0;
+  let attachments = 0;
+  let credentials = 0;
+
+  for (const conv of conversations) {
+    messages += conv.messages.length;
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = JSON.parse(conv.rawPayloadJson) as Record<string, unknown>;
+    } catch {
+      payload = {};
+    }
+
+    const marginNotes = typeof payload.marginNotes === "string" && payload.marginNotes.trim().length > 0;
+    const captureQuality = typeof payload.captureQuality === "string" ? payload.captureQuality.trim() : "";
+    const attachmentNote = typeof payload.attachments === "string" ? payload.attachments.trim() : "";
+    const credentialNote = typeof payload.credentials === "string" ? payload.credentials.trim() : "";
+    const url = typeof payload.url === "string" ? payload.url : null;
+
+    const text = conv.messages.map(m => m.content).join("\n");
+    const compressed = (text.match(/compressed|internal reasoning/gi) ?? []).length;
+    const stopped = (text.match(/Output stopped/gi) ?? []).length;
+
+    const hasAttachments = attachmentNote.length > 0 && !/^none\b/i.test(attachmentNote) && !/^no\b/i.test(attachmentNote);
+    const hasCredentials = credentialNote.length > 0 && !/^none\b/i.test(credentialNote);
+
+    if (!marginNotes) missingMargin += 1;
+    if (!captureQuality) missingCq += 1;
+    if (compressed > 0) { compressedThreads += 1; compressedTotal += compressed; }
+    if (stopped > 0) { stoppedThreads += 1; stoppedTotal += stopped; }
+    if (hasAttachments) attachments += 1;
+    if (hasCredentials) credentials += 1;
+
+    const priority = priorityFor(conv.title ?? "");
+    const isGap = !marginNotes || !captureQuality || compressed > 0 || stopped > 0 || hasAttachments || Boolean(priority);
+    if (isGap) {
+      gaps.push({
+        conversationId: conv.nativeConversationId,
+        title: conv.title ?? "(untitled)",
+        date: conv.nativeCreatedAt,
+        messageCount: conv.messages.length,
+        url,
+        missingMarginNotes: !marginNotes,
+        missingCaptureQuality: !captureQuality,
+        compressedReasoningMarkers: compressed,
+        outputStoppedMarkers: stopped,
+        attachmentsNotCaptured: hasAttachments ? attachmentNote : null,
+        credentialsPresent: hasCredentials ? credentialNote : null,
+        priority,
+      });
+    }
+  }
+
+  // Priority threads first, then the thinnest/most-damaged.
+  gaps.sort((a, b) => {
+    const pa = a.priority ? 1 : 0;
+    const pb = b.priority ? 1 : 0;
+    if (pa !== pb) return pb - pa;
+    return b.compressedReasoningMarkers + b.outputStoppedMarkers - (a.compressedReasoningMarkers + a.outputStoppedMarkers);
+  });
+
+  return {
+    threads: conversations.length,
+    messages,
+    threadsMissingMarginNotes: missingMargin,
+    threadsMissingCaptureQuality: missingCq,
+    threadsWithCompressedReasoning: compressedThreads,
+    totalCompressedReasoningMarkers: compressedTotal,
+    threadsWithOutputStopped: stoppedThreads,
+    totalOutputStopped: stoppedTotal,
+    threadsWithAttachmentsNotCaptured: attachments,
+    threadsWithCredentials: credentials,
+    gaps,
+  };
 }

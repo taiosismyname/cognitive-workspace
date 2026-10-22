@@ -9,6 +9,7 @@ import { parseClaudeExport } from "./importers/claudeExport";
 import { ENTRIES_QUERY_DISPLAY_LABEL, ENTRIES_QUERY_SOURCE_FORMAT, parseEntriesQueryExport } from "./importers/entriesQueryExport";
 import { PASTED_TRANSCRIPT_DISPLAY_LABEL, PASTED_TRANSCRIPT_SOURCE_FORMAT, parsePastedTranscript } from "./importers/pastedTranscript";
 import { KIMI_ARCHIVE_DISPLAY_LABEL, KIMI_ARCHIVE_SOURCE_FORMAT, parseKimiArchive } from "./importers/kimiArchive";
+import { GHOSTCODE_DISPLAY_LABEL, GHOSTCODE_SOURCE_FORMAT, parseGhostCodeExport } from "./importers/ghostcodeExport";
 import { persistParsedImport } from "./importers/persistImport";
 import { autoReconstructThreshold, maybeAutoReconstruct, runReconstruction } from "./reconstruction";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -16,7 +17,10 @@ import { ENV } from "./_core/env";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 
-const modelInput = z.object({ providerKey: z.string().min(1), modelKey: z.string().min(1), displayName: z.string().min(1), adapterStatus: z.enum(["active", "unimplemented", "disabled"]).default("active"), notes: z.string().optional() });
+const modelInput = z.object({ providerKey: z.string().min(1), modelKey: z.string().min(1), displayName: z.string().min(1), adapterStatus: z.enum(["active", "unimplemented", "disabled"]).default("active"), notes: z.string().optional(),
+  // Comma-separated history sources this lane owns (e.g. "kimi_archive" or
+  // "ghostcode_export,pasted_transcript"). Omit to include every imported source.
+  corpusProviderKeys: z.string().max(255).optional() });
 const memoryInput = z.object({ modelId: z.number().int().positive(), sourceConversationId: z.number().int().positive(), sourceMessageId: z.number().int().positive(), content: z.string().min(1), memoryType: z.string().min(1).default("fact"), isRetrievalEligible: z.boolean().default(true) });
 
 function requireDatabase(db: Awaited<ReturnType<typeof getDb>>) {
@@ -224,17 +228,30 @@ export const appRouter = router({
         const result = await persistParsedImport({ userId: ctx.user.id, providerKey: KIMI_ARCHIVE_SOURCE_FORMAT, displayLabel: KIMI_ARCHIVE_DISPLAY_LABEL, sourceFileName: input.sourceFileName ?? "kimi-archive.html", conversationsSeen: stats.conversationsSeen, parsed });
         return { ...result, sourceFormat: KIMI_ARCHIVE_SOURCE_FORMAT, parseStats: stats };
       }),
+    // Fifth labelled source: the cleaned GhostCode / Kairo Vale export
+    // ({ title, create_time, update_time, messages: [{ role, content }] }).
+    // Conversations dedupe by a hash of (title, create_time), so re-importing a
+    // refreshed export adds new threads instead of duplicating the 645 already
+    // held. Every record carries the entity key "KairoVale_GhostCode" so the
+    // corpus stays attributable to exactly one entity.
+    importGhostCodeExport: protectedProcedure
+      .input(z.object({ raw: z.unknown(), sourceFileName: z.string().max(255).optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const { conversations: parsed, stats } = parseGhostCodeExport(input);
+        const result = await persistParsedImport({ userId: ctx.user.id, providerKey: GHOSTCODE_SOURCE_FORMAT, displayLabel: GHOSTCODE_DISPLAY_LABEL, sourceFileName: input.sourceFileName ?? "extracted_conversations.json", conversationsSeen: stats.conversationsSeen, parsed });
+        return { ...result, sourceFormat: GHOSTCODE_SOURCE_FORMAT, parseStats: stats };
+      }),
     // The reconstruction call: load the lane's imported corpus, ask the lane's
     // model to reconstruct its own continuity state, and publish a new versioned
     // snapshot (retiring is_current on the previous one). Returns the published
     // snapshot so the caller can read it back immediately.
     reconstruct: protectedProcedure
-      .input(z.object({ modelId: z.number().int().positive(), historyImportId: z.number().int().positive().optional() }))
+      .input(z.object({ modelId: z.number().int().positive(), historyImportId: z.number().int().positive().optional(), providerKeys: z.array(z.string().min(1)).optional() }))
       .mutation(async ({ ctx, input }) => {
         const model = await ownsModel(ctx.user.id, input.modelId);
         if (!model) throw new TRPCError({ code: "NOT_FOUND", message: "Model not found." });
         try {
-          return await runReconstruction({ userId: ctx.user.id, model, historyImportId: input.historyImportId ?? null });
+          return await runReconstruction({ userId: ctx.user.id, model, historyImportId: input.historyImportId ?? null, providerKeys: input.providerKeys });
         } catch (error) {
           throw new TRPCError({ code: "BAD_GATEWAY", message: error instanceof Error ? error.message : "Reconstruction failed." });
         }

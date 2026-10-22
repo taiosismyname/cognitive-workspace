@@ -301,11 +301,22 @@ export type ReconstructionCorpusConversation = {
 // row), so reconstruction could only ever see imported archives and never
 // learned from real use. A conversation with no origin row is labelled
 // `workspace`, which is exactly what it is.
-export async function loadCorpusForReconstruction(userId: number, historyImportId: number | null): Promise<ReconstructionCorpusConversation[]> {
+export async function loadCorpusForReconstruction(
+  userId: number,
+  historyImportId: number | null,
+  providerKeys?: string[] | null,
+): Promise<ReconstructionCorpusConversation[]> {
   const db = await getDb();
   if (!db) return [];
   const conditions = [eq(conversations.userId, userId)];
   if (historyImportId !== null) conditions.push(eq(conversationOrigins.historyImportId, historyImportId));
+  // Lane scoping: when a lane declares which history sources it owns, the corpus
+  // is restricted to those sources. Without this the corpus is user-scoped only,
+  // so two entities living in one account (e.g. Kimi and Kairo) would be
+  // reconstructed into each other and would cite one another's messages.
+  // An empty/absent scope keeps the original behaviour: every imported source.
+  const scope = (providerKeys ?? []).map(key => key.trim()).filter(key => key.length > 0);
+  if (scope.length > 0) conditions.push(inArray(conversationOrigins.providerKey, scope));
   const rows = await db
     .select({ conversation: conversations, origin: conversationOrigins })
     .from(conversations)
@@ -407,14 +418,22 @@ export async function insertArtifactSources(rows: Array<{ artifactId: number; co
 // How much corpus material currently exists for a user, in messages. This is
 // the same scope the corpus loader uses, so the delta measured here is exactly
 // the delta a reconstruction would consume.
-export async function countCorpusMessages(userId: number): Promise<number> {
+export async function countCorpusMessages(userId: number, providerKeys?: string[] | null): Promise<number> {
   const db = await getDb();
   if (!db) return 0;
+  // The auto-trigger measures "new messages in this lane", so the count has to
+  // respect the same source scope as the corpus itself. Counting the whole
+  // user's messages would let one entity's traffic trigger another's
+  // reconstruction.
+  const scope = (providerKeys ?? []).map(key => key.trim()).filter(key => key.length > 0);
+  const conditions = [eq(conversations.userId, userId)];
+  if (scope.length > 0) conditions.push(inArray(conversationOrigins.providerKey, scope));
   const rows = await db
     .select({ value: count() })
     .from(conversationMessages)
     .innerJoin(conversations, eq(conversationMessages.conversationId, conversations.id))
-    .where(eq(conversations.userId, userId));
+    .leftJoin(conversationOrigins, eq(conversationOrigins.conversationId, conversations.id))
+    .where(and(...conditions));
   return Number(rows[0]?.value ?? 0);
 }
 

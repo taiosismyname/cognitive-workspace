@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { autoReconstructThreshold, cronAuthorized, planSnapshot, shouldAutoReconstruct } from "./reconstruction";
+import { autoReconstructThreshold, cronAuthorized, parseProviderKeys, planSnapshot, shouldAutoReconstruct } from "./reconstruction";
 import type { NormalizedStateArtifact } from "./continuity";
 
 function artifact(citations: NormalizedStateArtifact["citations"]): NormalizedStateArtifact {
@@ -91,5 +91,23 @@ describe("cronAuthorized", () => {
     expect(cronAuthorized("Bearer s3cret", "s3cret")).toBe(true);
     expect(cronAuthorized("bearer s3cret", "s3cret")).toBe(true);
     expect(cronAuthorized("Bearer s3cret", "s3cret\n")).toBe(true);
+  });
+});
+
+describe("parseProviderKeys", () => {
+  it("splits and trims a comma-separated lane scope", () => {
+    expect(parseProviderKeys("kimi_archive")).toEqual(["kimi_archive"]);
+    expect(parseProviderKeys("ghostcode_export, pasted_transcript")).toEqual(["ghostcode_export", "pasted_transcript"]);
+  });
+
+  it("drops blank entries so a trailing comma cannot widen the scope", () => {
+    expect(parseProviderKeys("kimi_archive,")).toEqual(["kimi_archive"]);
+    expect(parseProviderKeys(" , ,")).toEqual([]);
+  });
+
+  it("treats null/undefined/empty as 'no scope' (every imported source)", () => {
+    expect(parseProviderKeys(null)).toEqual([]);
+    expect(parseProviderKeys(undefined)).toEqual([]);
+    expect(parseProviderKeys("")).toEqual([]);
   });
 });

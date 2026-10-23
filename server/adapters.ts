@@ -108,6 +108,83 @@ export class OpenRouterAdapter implements ModelProviderAdapter {
   }
 }
 
+// NVIDIA NIM. The hosted endpoint is OpenAI-compatible, so this mirrors the
+// OpenRouter adapter: same three operations, different base URL and key.
+//
+// One adapter covers the whole collective: it can drive a Kairo lane and a Kimi
+// lane (Kimi K3 is offered through NVIDIA), so neither entity depends on an
+// OpenRouter middleman for its own reconstruction.
+//
+// The key is read from the environment only. It is never defaulted, logged, or
+// placed in a prompt.
+function requireNvidiaKey() {
+  const key = process.env.NVIDIA_API_KEY;
+  if (!key) {
+    throw new ProviderUnavailableError("nvidia", "NVIDIA is not configured. Add NVIDIA_API_KEY to enable live calls.");
+  }
+  return key;
+}
+
+async function nvidiaRequest(path: string, body?: unknown) {
+  const key = requireNvidiaKey();
+  const response = await fetch(`https://integrate.api.nvidia.com/v1/${path}`, {
+    method: body ? "POST" : "GET",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = typeof payload?.error?.message === "string"
+      ? payload.error.message
+      : typeof payload?.detail === "string" ? payload.detail : `NVIDIA request failed with ${response.status}`;
+    throw new Error(message);
+  }
+  return payload as Record<string, any>;
+}
+
+export class NvidiaAdapter implements ModelProviderAdapter {
+  readonly providerKey = "nvidia";
+
+  async listModels(): Promise<ProviderModel[]> {
+    const payload = await nvidiaRequest("models");
+    return (payload.data ?? []).map((model: any) => ({
+      providerKey: this.providerKey,
+      modelKey: String(model.id),
+      displayName: String(model.id),
+      adapterStatus: "active" as const,
+      capabilities: { ownedBy: model.owned_by ?? null },
+      notes: "Live model metadata from NVIDIA NIM.",
+    }));
+  }
+
+  async complete(input: { modelKey: string; messages: ChatTurn[] }): Promise<ProviderResponse> {
+    const payload = await nvidiaRequest("chat/completions", {
+      model: input.modelKey,
+      messages: input.messages,
+      temperature: 0.6,
+      max_tokens: 4096,
+    });
+    const content = payload.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || !content.trim()) {
+      throw new Error("NVIDIA returned no text content.");
+    }
+    return { text: content, requestId: payload.id, raw: payload };
+  }
+
+  async embed(input: { modelKey: string; input: string }): Promise<number[]> {
+    const payload = await nvidiaRequest("embeddings", { model: input.modelKey, input: input.input });
+    const embedding = payload.data?.[0]?.embedding;
+    if (!Array.isArray(embedding) || embedding.length === 0) {
+      throw new Error("NVIDIA returned no embedding vector for that model.");
+    }
+    return embedding.map(Number);
+  }
+}
+
 export const unimplementedProviders: ProviderModel[] = [
   {
     providerKey: "anthropic-direct",
@@ -129,6 +206,7 @@ export const unimplementedProviders: ProviderModel[] = [
 
 const adapters: Record<string, ModelProviderAdapter> = {
   openrouter: new OpenRouterAdapter(),
+  nvidia: new NvidiaAdapter(),
 };
 
 export function getAdapter(providerKey: string): ModelProviderAdapter {
